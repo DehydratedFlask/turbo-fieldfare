@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// Who a refused lock is waiting on. The pack's use lease is *shared*, so a
 /// blocked mutation is as likely to be waiting on a loaded model as on another
@@ -34,6 +35,7 @@ public enum RepackError: Error, CustomStringConvertible {
     case indexJsonInvalid(path: String, detail: String)
     case configJsonInvalid(path: String, detail: String)
     case unsupportedModelFamily(String)
+    case unsupportedFamily(ModelFamily)
     case quantOverrideCountMismatch(expected: Int, actual: Int, sample: [String])
 
     case missingTensor(name: String)
@@ -103,6 +105,8 @@ public enum RepackError: Error, CustomStringConvertible {
         case .configJsonInvalid(let p, let d): return "config.json \(p) invalid: \(d)"
         case .unsupportedModelFamily(let family):
             return "unsupported model family: \(family)"
+        case .unsupportedFamily(let family):
+            return "unsupported model family: \(family.rawValue)"
         case .quantOverrideCountMismatch(let exp, let got, let sample):
             return "config.json quantization overrides: expected \(exp), got \(got); sample=\(sample.prefix(5))"
         case .missingTensor(let n): return "expected tensor missing: \(n)"

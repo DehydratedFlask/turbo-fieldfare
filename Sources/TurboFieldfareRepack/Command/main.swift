@@ -63,6 +63,18 @@ private func runVisionInstall(_ arguments: RepackArguments) async -> Int32? {
 
     guard let textModel = arguments.textModel else { return 2 }
 
+    // Refuse an LFM text model before the installer takes a lock or creates
+    // any output path: no LFM checkpoint ships an image tower, so a companion
+    // pack could never be bound to it.
+    do {
+        try RemoteVisionPackInstaller.ensureGemmaTextModel(
+            at: URL(fileURLWithPath: textModel, isDirectory: true),
+            outputDirectory: URL(fileURLWithPath: visionOutput, isDirectory: true))
+    } catch {
+        printError("vision install failed: \(error)")
+        return 1
+    }
+
     if arguments.verifyVisionInstall {
         do {
             let verification = try VisionPackVerifier.verify(

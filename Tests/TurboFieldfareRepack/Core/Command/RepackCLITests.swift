@@ -182,4 +182,37 @@ struct RepackCLITests {
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
+    /// An LFM text model can never bind an image companion, so the refusal has
+    /// to land before the installer takes a lock or creates a partial
+    /// directory, checkpoint, or output path.
+    @Test func lfmTextModelIsRejectedBeforeAnyVisionOutputExists() throws {
+        let parent = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("turbofieldfare-cli-lfm-vision-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            atPath: parent, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: parent) }
+
+        let textModel = try writeInstalledLFMTextModel(
+            in: URL(fileURLWithPath: parent, isDirectory: true))
+        let output = (parent as NSString)
+            .appendingPathComponent("model.vision.gturbo")
+
+        let result = try run([
+            "--vision-output", output,
+            "--text-model", textModel.path,
+        ])
+
+        #expect(result.status == 1)
+        #expect(result.stderr.contains("unsupported model family: lfm2_moe"))
+        for path in [
+            output,
+            output + ".partial",
+            output + ".install.lock",
+            output + ".resume.json",
+        ] {
+            #expect(!FileManager.default.fileExists(atPath: path),
+                    "\(path) was created before the family check")
+        }
+    }
+
 }

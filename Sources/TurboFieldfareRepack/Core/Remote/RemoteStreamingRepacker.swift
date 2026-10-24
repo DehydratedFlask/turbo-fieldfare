@@ -1,4 +1,6 @@
 import Foundation
+import TurboFieldfareFormat
+
 public struct RemoteStreamingRepackOptions: Sendable {
     public let repoID: String
     public let revision: String
@@ -334,6 +336,7 @@ public final class RemoteStreamingRepacker {
         try await copyRemoteMetadataSidecars(snapshot: snapshot,
                                              remote: remote,
                                              partialDir: paths.partialDirectory,
+                                             family: plan.arch.family,
                                              progress: progress)
         try? FileManager.default.removeItem(atPath: paths.rangeTemporaryFile)
         try? FileManager.default.removeItem(atPath: paths.metadataDirectory)
@@ -501,6 +504,7 @@ public final class RemoteStreamingRepacker {
     private func copyRemoteMetadataSidecars(snapshot: RemoteSnapshot,
                                            remote: HuggingFaceRemoteSource,
                                            partialDir: String,
+                                           family: ModelFamily,
                                            progress: @Sendable (ModelInstallProgress) -> Void) async throws {
         let tokenizerDir = (partialDir as NSString).appendingPathComponent("tokenizer")
         for filename in ["config.json"] {
@@ -546,6 +550,20 @@ public final class RemoteStreamingRepacker {
             try recordOutputFile(relativePath: "tokenizer/\(file.name)",
                                  path: dst,
                                             progress: progress)
+        }
+
+        // LFM packs carry the identity of the bytes above so the runtime can
+        // reject a rebuilt or swapped tokenizer. Gemma keeps its identity
+        // compiled in and gets no file, leaving every existing pack unchanged.
+        if (try TokenizerIdentity.writeIfNeeded(
+            for: URL(fileURLWithPath: tokenizerDir, isDirectory: true),
+            family: family)) != nil {
+            let identityPath = (tokenizerDir as NSString)
+                .appendingPathComponent(TokenizerIdentity.fileName)
+            try recordOutputFile(
+                relativePath: "tokenizer/\(TokenizerIdentity.fileName)",
+                path: identityPath,
+                progress: progress)
         }
     }
 

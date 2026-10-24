@@ -128,6 +128,10 @@ public final class RemoteVisionPackInstaller {
     public func prepare(
         progress: @escaping @Sendable (ModelInstallProgress) -> Void = { _ in }
     ) async throws -> RemoteVisionPackInstallResult {
+        try Self.ensureGemmaTextModel(
+            at: URL(fileURLWithPath: options.textModelDirectory, isDirectory: true),
+            outputDirectory: URL(fileURLWithPath: options.outputDirectory,
+                                 isDirectory: true))
         try validateOptions()
         let lock = try InstallLock.acquire(outputDirectory: options.outputDirectory)
         defer { withExtendedLifetime(lock) {} }
@@ -185,6 +189,37 @@ public final class RemoteVisionPackInstaller {
                 try? FileManager.default.removeItem(atPath: paths.partialDirectory)
             }
             throw error
+        }
+    }
+
+    /// Refuses to build an image companion for a text model whose manifest
+    /// names a family without a vision tower.
+    ///
+    /// Called before the install lock, partial directory, checkpoint, or any
+    /// output path exists, so a refusal leaves no trace of a started install.
+    /// The destination is accepted but never touched, so the check is safe to
+    /// run before it exists.
+    ///
+    /// A text manifest that cannot be read is not this check's verdict: the
+    /// install path reports it precisely, and `--resume` reports saved state
+    /// before it reads the text model at all. Only a manifest that decodes and
+    /// names a non-Gemma family is refused here.
+    public static func ensureGemmaTextModel(
+        at textModelDirectory: URL,
+        outputDirectory: URL
+    ) throws {
+        let manifestPath = textModelDirectory
+            .appendingPathComponent(GTurboVisionFormatV1.manifestFile)
+            .path
+        guard let data = try? Posix.readBoundedData(
+                  manifestPath,
+                  maximumBytes: GTurboVisionFormatV1.metadataMaxBytes),
+              let wire = try? GTurboManifestCodec.decodeUnchecked(data),
+              let family = wire.arch.family else {
+            return
+        }
+        guard family == .gemma4 else {
+            throw RepackError.unsupportedFamily(family)
         }
     }
 
