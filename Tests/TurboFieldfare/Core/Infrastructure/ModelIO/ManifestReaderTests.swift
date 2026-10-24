@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import Darwin
 @testable import TurboFieldfare
+@testable import TurboFieldfareFormat
 
 @Suite struct ManifestReaderTests {
 
@@ -83,7 +84,7 @@ import Darwin
             "files": files,
             "expertsPerLayer": toy.numExperts,
             "numLayers": toy.numLayers,
-            "expertStride": 16384,
+            "expertStride": Int(toy.admission.expertStrideBytes),
         ]
         for (k, v) in overrides { root[k] = v }
 
@@ -287,6 +288,133 @@ import Darwin
         let m = try ManifestReader.load(directoryURL: dir, expecting: toy)
         #expect(m.numLayers == toy.numLayers)
     }
+
+    @Test func peekFamilyDefaultsToGemmaWhenAbsent() throws {
+        let dir = try writeManifest(makeGemmaWireWithoutFamily())
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try ManifestReader.peekFamily(directoryURL: dir) == .gemma4)
+    }
+
+    @Test func lfmManifestRejectsGemmaConstants() throws {
+        let data = try GTurboManifestCodec.encode(makeLFMWireWithGemmaHiddenSize())
+        #expect(throws: ModelError.self) {
+            try ManifestReader.decode(data: data, expecting: .lfm2_5_24B_A2B)
+        }
+    }
+
+    @Test func expertStrideMustMatchFamilyProfile() throws {
+        let data = try GTurboManifestCodec.encode(makeLFMWire(expertStride: 3_358_720))
+        #expect(throws: ModelError.self) {
+            try ManifestReader.decode(data: data, expecting: .lfm2_5_24B_A2B)
+        }
+    }
+}
+
+private let zeroSHA = String(repeating: "0", count: 64)
+
+private func wireQuantSlot(_ bits: Int) -> GTurboManifestQuantSlotV1 {
+    GTurboManifestQuantSlotV1(weightBits: bits, scheme: "affine",
+                              scaleType: "bf16", biasType: "bf16",
+                              groupSize: Quantization.groupSize)
+}
+
+private func wireFiles() -> [String: GTurboManifestFileV1] {
+    [
+        "model_weights.bin": GTurboManifestFileV1(size: 1024, sha256: zeroSHA),
+        "packed_experts/layout.json": GTurboManifestFileV1(size: 1024, sha256: zeroSHA),
+    ]
+}
+
+/// Encode a wire manifest into a fresh temp directory so directory-reading
+/// paths (`peekFamily`, `load`) can be exercised.
+private func writeManifest(_ wire: GTurboManifestV1) throws -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("gturbo-wire-manifest-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try GTurboManifestCodec.encode(wire)
+        .write(to: dir.appendingPathComponent("manifest.json"))
+    return dir
+}
+
+private let lfmFullAttentionLayers = [2, 6, 10, 14, 18, 22, 26, 30, 34, 38]
+
+/// A manifest with no `arch.family`, i.e. the Gemma-defaulting shape every
+/// pre-LFM checkpoint has.
+private func makeGemmaWireWithoutFamily() -> GTurboManifestV1 {
+    GTurboManifestV1(
+        flags: ["streamingPresent": true, "turboQuantKV": false,
+                "aneSharedExpert": false],
+        modelID: "test/gemma",
+        sourceSnapshotHash: nil,
+        arch: GTurboManifestArchV1(
+            hiddenSize: 64, ffnIntermediate: 128, moeIntermediateSize: 32,
+            numHeads: 4, numKVHeads: 2, numFullKVHeads: 1,
+            headDim: 16, fullHeadDim: 32, vocabSize: 1024,
+            slidingWindow: 128, finalLogitSoftcap: 30,
+            ropeTheta: 10_000, fullRopeTheta: 1_000_000,
+            partialRotaryFactor: 0.25, numLayers: 2, numExperts: 8,
+            topKExperts: 2, tieWordEmbeddings: true, attentionKEqV: true,
+            hiddenActivation: "gelu_pytorch_tanh",
+            fullAttentionLayerMask: [0, 1]),
+        quant: GTurboManifestQuantV1(
+            embedding: wireQuantSlot(4), attention: wireQuantSlot(4),
+            router: wireQuantSlot(8), sharedExpert: wireQuantSlot(4),
+            routedExpert: wireQuantSlot(4)),
+        files: wireFiles(),
+        expertsPerLayer: 8, numLayers: 2, expertStride: 16_384,
+        bitWidthOverridesHonored: nil)
+}
+
+/// LFM2.5-shaped wire matching `ArchConfig.lfm2_5_24B_A2B`, with the two
+/// overridable fields the mismatch tests need.
+private func makeLFMWire(expertStride: UInt64 = 5_308_416,
+                         hiddenSize: Int = 2048) -> GTurboManifestV1 {
+    let layerTypes: [LayerType] = (0..<40).map {
+        lfmFullAttentionLayers.contains($0) ? .fullAttention : .conv
+    }
+    return GTurboManifestV1(
+        flags: ["streamingPresent": true, "turboQuantKV": false,
+                "aneSharedExpert": false],
+        modelID: "test/lfm",
+        sourceSnapshotHash: nil,
+        arch: GTurboManifestArchV1(
+            hiddenSize: hiddenSize, ffnIntermediate: 11_776,
+            moeIntermediateSize: 1536,
+            numHeads: 32, numKVHeads: 8, numFullKVHeads: 8,
+            headDim: 64, fullHeadDim: 64, vocabSize: 128_000,
+            slidingWindow: 0, finalLogitSoftcap: 0,
+            ropeTheta: 10_000_000, fullRopeTheta: 10_000_000,
+            partialRotaryFactor: 1, numLayers: 40, numExperts: 64,
+            topKExperts: 4, tieWordEmbeddings: true, attentionKEqV: false,
+            hiddenActivation: "silu",
+            fullAttentionLayerMask: layerTypes.map {
+                $0 == .fullAttention ? 1 : 0
+            },
+            family: .lfm2Moe,
+            layerTypes: layerTypes,
+            moeLayerMask: Array(repeating: 0, count: 2)
+                + Array(repeating: 1, count: 38),
+            attentionScale: 0.125,
+            rmsNormUnitOffset: false,
+            ropeStyle: .neoxFull,
+            convKernelSize: 3,
+            routerKind: .lfm2SigmoidTopKBias,
+            sharedExpert: false,
+            embeddingScaledBySqrtHidden: false,
+            numDenseLayers: 2,
+            routerNormalizeTopK: true,
+            routerBias: true,
+            routedScalingFactor: 1),
+        quant: GTurboManifestQuantV1(
+            embedding: wireQuantSlot(6), attention: wireQuantSlot(4),
+            sharedExpert: wireQuantSlot(4), routedExpert: wireQuantSlot(4)),
+        files: wireFiles(),
+        expertsPerLayer: 64, numLayers: 40, expertStride: expertStride,
+        bitWidthOverridesHonored: nil)
+}
+
+private func makeLFMWireWithGemmaHiddenSize() -> GTurboManifestV1 {
+    makeLFMWire(hiddenSize: 2816)
 }
 
 extension ArchConfig {
@@ -314,7 +442,14 @@ extension ArchConfig {
             tieWordEmbeddings: true,
             attentionKEqV: true,
             fullAttentionLayerMask: [0, 1],
-            hiddenActivation: "gelu_pytorch_tanh"
+            hiddenActivation: "gelu_pytorch_tanh",
+            // Toy manifests use a 16 KB expert stride, so the admission
+            // profile must match it rather than the production Gemma value.
+            admission: ArchAdmissionProfile(
+                expertStrideBytes: 16_384,
+                expertCacheLayers: 2,
+                includedExpertCacheSlots: 0,
+                nonKVRuntimeFootprintBytes: 0)
         )
     }
 }

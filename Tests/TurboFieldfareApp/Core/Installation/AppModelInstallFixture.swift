@@ -61,7 +61,7 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "files": files,
         "expertsPerLayer": arch.numExperts,
         "numLayers": arch.numLayers,
-        "expertStride": UInt64(getpagesize()),
+        "expertStride": arch.admission.expertStrideBytes,
     ]
     let manifestData = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     let manifestURL = directory.appendingPathComponent("manifest.json")

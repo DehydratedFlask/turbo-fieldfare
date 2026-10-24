@@ -84,7 +84,14 @@ import Testing
             ropeTheta: 10_000, fullRopeTheta: 1_000_000,
             partialRotaryFactor: 0.25, numLayers: 1, numExperts: 2,
             topKExperts: 1, tieWordEmbeddings: true, attentionKEqV: true,
-            fullAttentionLayerMask: [0], hiddenActivation: "gelu_pytorch_tanh")
+            fullAttentionLayerMask: [0], hiddenActivation: "gelu_pytorch_tanh",
+            // The frozen fixture uses the format's page-size expert stride, so
+            // the toy admission profile must match rather than inherit Gemma's.
+            admission: ArchAdmissionProfile(
+                expertStrideBytes: GTurboFormatV1.alignmentBytes,
+                expertCacheLayers: 1,
+                includedExpertCacheSlots: 0,
+                nonKVRuntimeFootprintBytes: 0))
         let arch = ArchInfo(
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,

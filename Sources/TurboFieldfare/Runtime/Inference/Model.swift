@@ -513,6 +513,10 @@ extension Model {
             throw ModelError.indexCorrupt(
                 detail: "manifest.quant is required by the executable runtime schema")
         }
+        guard let routerSlot = quant.router else {
+            throw ModelError.indexCorrupt(
+                detail: "manifest.quant.router is required by the Gemma runtime")
+        }
 
         func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
             let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
@@ -666,7 +670,7 @@ extension Model {
                               slot: quant.sharedExpert)
             try requireAffine("\(prefix).router.proj.weight",
                               rows: config.numExperts, columns: config.hiddenSize,
-                              slot: quant.router)
+                              slot: routerSlot)
         }
 
         let routedShapes: [(String, Int, Int)] = [

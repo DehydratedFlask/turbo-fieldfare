@@ -28,6 +28,20 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let attentionKEqV: Bool
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
+    public let family: ModelFamily?
+    public let layerTypes: [LayerType]?
+    public let moeLayerMask: [Int]?
+    public let attentionScale: Double?
+    public let rmsNormUnitOffset: Bool?
+    public let ropeStyle: RopeStyle?
+    public let convKernelSize: Int?
+    public let routerKind: RouterKind?
+    public let sharedExpert: Bool?
+    public let embeddingScaledBySqrtHidden: Bool?
+    public let numDenseLayers: Int?
+    public let routerNormalizeTopK: Bool?
+    public let routerBias: Bool?
+    public let routedScalingFactor: Double?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -41,7 +55,7 @@ public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
 public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let embedding: ManifestQuantSlot
     public let attention: ManifestQuantSlot
-    public let router: ManifestQuantSlot
+    public let router: ManifestQuantSlot?
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
 }
@@ -87,6 +101,36 @@ public enum ManifestReader {
         return try decode(data: data, expecting: expecting)
     }
 
+    /// Read only `arch.family`, without validating or hashing anything else.
+    /// Used to pick the baseline before the full load; an absent family means
+    /// `.gemma4`.
+    public static func peekFamily(directoryURL: URL,
+                                  maxBytes: UInt64 = defaultMaxBytes) throws -> ModelFamily {
+        let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        let data: Data
+        do {
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
+            throw ModelError.partialInstall(path: directoryURL.path)
+        }
+        do {
+            let wire = try GTurboManifestCodec.decodeUnchecked(data)
+            guard wire.magic == GTurboFormatV1.magic else {
+                throw ModelError.notAGTurboDirectory
+            }
+            guard wire.versionMajor == GTurboFormatV1.versionMajor,
+                  wire.versionMinor >= 0 else {
+                throw ModelError.unsupportedVersion(major: wire.versionMajor,
+                                                    minor: wire.versionMinor)
+            }
+            return wire.arch.family ?? .gemma4
+        } catch let error as ModelError {
+            throw error
+        } catch {
+            throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
+        }
+    }
+
     package static func decode(data: Data,
                                expecting: ArchConfig) throws -> Manifest {
         let manifest: Manifest
@@ -109,7 +153,7 @@ public enum ManifestReader {
                     pageSize: Int(GTurboFormatV1.alignmentBytes))
             }
             try GTurboManifestCodec.validate(wire)
-            manifest = try Manifest(wire: wire)
+            manifest = Manifest(wire: wire)
         } catch let error as ModelError {
             throw error
         } catch {
@@ -126,9 +170,13 @@ public enum ManifestReader {
             throw ModelError.indexCorrupt(
                 detail: "manifest requests removed TurboQuant KV runtime support")
         }
-        try validateArch(m.arch, expected: expected)
+        try validateArch(m.arch, expertStride: m.expertStride, expected: expected)
         if let quant = m.quant {
-            try validateQuant(quant)
+            if expected.family == .gemma4, quant.router == nil {
+                throw ModelError.indexCorrupt(
+                    detail: "manifest.quant.router is required by the Gemma runtime")
+            }
+            try validateQuant(quant, family: expected.family)
         } else if expected.numLayers == ArchConfig.gemma4_26B_A4B.numLayers,
                   expected.hiddenSize == ArchConfig.gemma4_26B_A4B.hiddenSize {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
@@ -138,14 +186,16 @@ public enum ManifestReader {
         }
     }
 
-    private static func validateQuant(_ quant: ManifestQuant) throws {
-        let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4]),
+    private static func validateQuant(_ quant: ManifestQuant,
+                                      family: ModelFamily) throws {
+        let embeddingBits: Set<Int> = family == .lfm2Moe ? [6] : [4]
+        var slots: [(String, ManifestQuantSlot, Set<Int>)] = [
+            ("embedding", quant.embedding, embeddingBits),
             ("attention", quant.attention, [4]),
-            ("router", quant.router, [8]),
             ("sharedExpert", quant.sharedExpert, [4, 8]),
             ("routedExpert", quant.routedExpert, [4]),
         ]
+        if let router = quant.router { slots.append(("router", router, [8])) }
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),
                   slot.scheme.lowercased() == "affine",
@@ -158,6 +208,7 @@ public enum ManifestReader {
     }
 
     private static func validateArch(_ a: ManifestArch,
+                                     expertStride: UInt64,
                                      expected e: ArchConfig) throws {
         func check<T: Equatable & CustomStringConvertible>(
             _ field: String, _ actual: T, _ expected: T) throws {
@@ -191,6 +242,45 @@ public enum ManifestReader {
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
+        // Optional traits: an absent field means the expected baseline value,
+        // so pre-LFM manifests keep their meaning.
+        try check("family",
+                  (a.family ?? e.family).rawValue,
+                  e.family.rawValue)
+        try check("layerTypes",
+                  (a.layerTypes ?? e.layerTypes).map(\.rawValue).description,
+                  e.layerTypes.map(\.rawValue).description)
+        let expectedMoeMask = e.moeLayerMask.map(Int.init)
+        try check("moeLayerMask",
+                  (a.moeLayerMask ?? expectedMoeMask).description,
+                  expectedMoeMask.description)
+        try check("attentionScale",      a.attentionScale ?? e.attentionScale,
+                  e.attentionScale)
+        try check("rmsNormUnitOffset",   a.rmsNormUnitOffset ?? e.rmsNormUnitOffset,
+                  e.rmsNormUnitOffset)
+        try check("ropeStyle",
+                  (a.ropeStyle ?? e.ropeStyle).rawValue,
+                  e.ropeStyle.rawValue)
+        try check("convKernelSize",      a.convKernelSize ?? e.convKernelSize,
+                  e.convKernelSize)
+        try check("routerKind",
+                  (a.routerKind ?? e.routerKind).rawValue,
+                  e.routerKind.rawValue)
+        try check("sharedExpert",        a.sharedExpert ?? e.hasSharedExpert,
+                  e.hasSharedExpert)
+        try check("embeddingScaledBySqrtHidden",
+                  a.embeddingScaledBySqrtHidden ?? e.embeddingScaledBySqrtHidden,
+                  e.embeddingScaledBySqrtHidden)
+        try check("numDenseLayers",      a.numDenseLayers ?? e.numDenseLayers,
+                  e.numDenseLayers)
+        try check("routerNormalizeTopK", a.routerNormalizeTopK ?? e.routerNormalizeTopK,
+                  e.routerNormalizeTopK)
+        try check("routerBias",          a.routerBias ?? e.routerBias,
+                  e.routerBias)
+        try check("routedScalingFactor", a.routedScalingFactor ?? e.routedScalingFactor,
+                  e.routedScalingFactor)
+        try check("expertStride",        expertStride,
+                  e.admission.expertStrideBytes)
     }
 }
 
@@ -222,7 +312,21 @@ private extension ManifestArch {
                   tieWordEmbeddings: wire.tieWordEmbeddings,
                   attentionKEqV: wire.attentionKEqV,
                   hiddenActivation: wire.hiddenActivation,
-                  fullAttentionLayerMask: wire.fullAttentionLayerMask)
+                  fullAttentionLayerMask: wire.fullAttentionLayerMask,
+                  family: wire.family,
+                  layerTypes: wire.layerTypes,
+                  moeLayerMask: wire.moeLayerMask,
+                  attentionScale: wire.attentionScale,
+                  rmsNormUnitOffset: wire.rmsNormUnitOffset,
+                  ropeStyle: wire.ropeStyle,
+                  convKernelSize: wire.convKernelSize,
+                  routerKind: wire.routerKind,
+                  sharedExpert: wire.sharedExpert,
+                  embeddingScaledBySqrtHidden: wire.embeddingScaledBySqrtHidden,
+                  numDenseLayers: wire.numDenseLayers,
+                  routerNormalizeTopK: wire.routerNormalizeTopK,
+                  routerBias: wire.routerBias,
+                  routedScalingFactor: wire.routedScalingFactor)
     }
 }
 
@@ -235,21 +339,17 @@ private extension ManifestQuantSlot {
 }
 
 private extension ManifestQuant {
-    init(wire: GTurboManifestQuantV1) throws {
-        guard let router = wire.router else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.quant.router is required by the Gemma runtime")
-        }
+    init(wire: GTurboManifestQuantV1) {
         self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
                   attention: ManifestQuantSlot(wire: wire.attention),
-                  router: ManifestQuantSlot(wire: router),
+                  router: wire.router.map(ManifestQuantSlot.init(wire:)),
                   sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
                   routedExpert: ManifestQuantSlot(wire: wire.routedExpert))
     }
 }
 
 private extension Manifest {
-    init(wire: GTurboManifestV1) throws {
+    init(wire: GTurboManifestV1) {
         self.init(magic: wire.magic,
                   versionMajor: wire.versionMajor,
                   versionMinor: wire.versionMinor,
@@ -257,7 +357,7 @@ private extension Manifest {
                   modelID: wire.modelID,
                   sourceSnapshotHash: wire.sourceSnapshotHash,
                   arch: ManifestArch(wire: wire.arch),
-                  quant: try wire.quant.map(ManifestQuant.init(wire:)),
+                  quant: wire.quant.map(ManifestQuant.init(wire:)),
                   files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
                   expertsPerLayer: wire.expertsPerLayer,
                   numLayers: wire.numLayers,
