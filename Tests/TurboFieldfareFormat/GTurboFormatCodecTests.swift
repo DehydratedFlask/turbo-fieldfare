@@ -268,7 +268,167 @@ private enum FormatFixture {
         let wire = makeGemmaManifest().with(quant: makeGemmaManifest().quant!.with(router: nil))
         #expect(throws: GTurboFormatError.self) { try GTurboManifestCodec.validate(wire) }
     }
+
+    @Test func rejectsLayerTypesCountMismatch() throws {
+        let base = makeLFMManifest()
+        let layerTypes = try #require(base.arch.layerTypes)
+        let wire = base.with(arch: base.arch.with(layerTypes: Array(layerTypes.dropLast())))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.layerTypes", reason: "count disagrees with numLayers")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsLayerTypeThatDisagreesWithFullAttentionMask() throws {
+        let base = makeLFMManifest()
+        var layerTypes = try #require(base.arch.layerTypes)
+        layerTypes[0] = .fullAttention
+        let wire = base.with(arch: base.arch.with(layerTypes: layerTypes))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.layerTypes.0",
+            reason: "layer type disagrees with fullAttentionLayerMask")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsMoeLayerMaskCountMismatch() throws {
+        let base = makeLFMManifest()
+        let mask = try #require(base.arch.moeLayerMask)
+        let wire = base.with(arch: base.arch.with(moeLayerMask: Array(mask.dropLast())))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.moeLayerMask", reason: "invalid MoE layer mask")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsNonBinaryMoeLayerMask() throws {
+        let base = makeLFMManifest()
+        var mask = try #require(base.arch.moeLayerMask)
+        mask[5] = 2
+        let wire = base.with(arch: base.arch.with(moeLayerMask: mask))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.moeLayerMask", reason: "invalid MoE layer mask")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test(arguments: [0.0, -1.0, Double.nan, Double.infinity])
+    func rejectsNonPositiveOrNonFiniteAttentionScale(_ scale: Double) throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(attentionScale: scale))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.attentionScale",
+            reason: "expected a positive finite value")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsNegativeConvKernelSize() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(convKernelSize: -1))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.convKernelSize", reason: "expected a non-negative value")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsNonFiniteRoutedScalingFactor() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(routedScalingFactor: .nan))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.routedScalingFactor", reason: "expected a finite value")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func rejectsZeroSlidingWindowWithoutLayerTypes() throws {
+        let base = makeGemmaManifest()
+        let wire = base.with(arch: base.arch.with(slidingWindow: 0))
+        #expect(throws: GTurboFormatError.invalid(
+            field: "manifest.arch.slidingWindow",
+            reason: "zero sliding window requires layerTypes without sliding attention")) {
+            try GTurboManifestCodec.validate(wire)
+        }
+    }
+
+    @Test func lfmRequiresLayerTypes() throws {
+        let base = makeLFMManifest()
+        // A positive sliding window keeps the zero-window rule out of the way.
+        let wire = base.with(arch: base.arch.with(
+            slidingWindow: 128, layerTypes: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresMoeLayerMask() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(moeLayerMask: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresThreeWideConvKernel() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(convKernelSize: 2))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresSigmoidTopKBiasRouter() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(routerKind: .gemmaSoftmaxTopK))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresSharedExpertToBeDisabled() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(sharedExpert: true))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresExplicitSharedExpertFlag() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(sharedExpert: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresUnscaledEmbeddings() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(embeddingScaledBySqrtHidden: true))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresExplicitEmbeddingScalingFlag() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(embeddingScaledBySqrtHidden: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresNumDenseLayers() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(numDenseLayers: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresRouterNormalizeTopK() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(routerNormalizeTopK: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRequiresRouterBias() throws {
+        let base = makeLFMManifest()
+        let wire = base.with(arch: base.arch.with(routerBias: .some(nil)))
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func lfmRejectsAffineRouterSlot() throws {
+        let base = makeLFMManifest()
+        let quant = try #require(base.quant).with(router: FormatFixture.quantSlot)
+        let wire = base.with(quant: quant)
+        #expect(throws: lfmIncompleteTraits) { try GTurboManifestCodec.validate(wire) }
+    }
 }
+
+private let lfmIncompleteTraits = GTurboFormatError.invalid(
+    field: "manifest.arch.family", reason: "incomplete lfm2_moe traits")
 
 private func makeGemmaManifest() -> GTurboManifestV1 { FormatFixture.manifest() }
 
@@ -305,9 +465,21 @@ private extension GTurboManifestQuantV1 {
 }
 
 private extension GTurboManifestArchV1 {
+    /// Overrides one field for a single-rule-violation test. An omitted single
+    /// optional leaves the field unchanged; the double-optional parameters
+    /// also distinguish "unchanged" from "cleared" via `.some(nil)`.
     func with(slidingWindow: Int? = nil,
-              layerTypes: [LayerType]? = nil,
-              moeLayerMask: [Int]? = nil) -> GTurboManifestArchV1 {
+              layerTypes: [LayerType]?? = nil,
+              moeLayerMask: [Int]?? = nil,
+              attentionScale: Double? = nil,
+              convKernelSize: Int? = nil,
+              routerKind: RouterKind? = nil,
+              sharedExpert: Bool?? = nil,
+              embeddingScaledBySqrtHidden: Bool?? = nil,
+              numDenseLayers: Int?? = nil,
+              routerNormalizeTopK: Bool?? = nil,
+              routerBias: Bool?? = nil,
+              routedScalingFactor: Double? = nil) -> GTurboManifestArchV1 {
         GTurboManifestArchV1(
             hiddenSize: hiddenSize, ffnIntermediate: ffnIntermediate,
             moeIntermediateSize: moeIntermediateSize,
@@ -326,17 +498,18 @@ private extension GTurboManifestArchV1 {
             family: family,
             layerTypes: layerTypes ?? self.layerTypes,
             moeLayerMask: moeLayerMask ?? self.moeLayerMask,
-            attentionScale: attentionScale,
+            attentionScale: attentionScale ?? self.attentionScale,
             rmsNormUnitOffset: rmsNormUnitOffset,
             ropeStyle: ropeStyle,
-            convKernelSize: convKernelSize,
-            routerKind: routerKind,
-            sharedExpert: sharedExpert,
-            embeddingScaledBySqrtHidden: embeddingScaledBySqrtHidden,
-            numDenseLayers: numDenseLayers,
-            routerNormalizeTopK: routerNormalizeTopK,
-            routerBias: routerBias,
-            routedScalingFactor: routedScalingFactor)
+            convKernelSize: convKernelSize ?? self.convKernelSize,
+            routerKind: routerKind ?? self.routerKind,
+            sharedExpert: sharedExpert ?? self.sharedExpert,
+            embeddingScaledBySqrtHidden: embeddingScaledBySqrtHidden
+                ?? self.embeddingScaledBySqrtHidden,
+            numDenseLayers: numDenseLayers ?? self.numDenseLayers,
+            routerNormalizeTopK: routerNormalizeTopK ?? self.routerNormalizeTopK,
+            routerBias: routerBias ?? self.routerBias,
+            routedScalingFactor: routedScalingFactor ?? self.routedScalingFactor)
     }
 }
 
