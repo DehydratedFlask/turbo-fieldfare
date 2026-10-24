@@ -568,21 +568,18 @@ extension Model {
                          slot: ManifestQuantSlot,
                          field: String) throws -> (shape: (UInt32, UInt32), weight: UInt64, aux: UInt64) {
             let shape = try dimensions(rows, columns, field: field)
-            guard slot.weightBits == 4 || slot.weightBits == 8,
-                  slot.groupSize > 0,
-                  columns % slot.groupSize == 0 else {
-                throw ModelError.indexCorrupt(detail: "\(field) has unsupported affine quantization")
+            let sizes: Quantization.AffineSizes
+            do {
+                sizes = try Quantization.affineSizes(
+                    rows: rows,
+                    columns: columns,
+                    bits: slot.weightBits,
+                    groupSize: slot.groupSize)
+            } catch {
+                throw ModelError.indexCorrupt(
+                    detail: "\(field) has unsupported affine quantization")
             }
-            let elements = try checkedMultiply(UInt64(rows), UInt64(columns), field: field)
-            let bitCount = try checkedMultiply(elements, UInt64(slot.weightBits), field: field)
-            guard bitCount % 8 == 0 else {
-                throw ModelError.indexCorrupt(detail: "\(field) packed byte count is fractional")
-            }
-            let groups = UInt64(columns / slot.groupSize)
-            let auxElements = try checkedMultiply(UInt64(shape.0), groups, field: field)
-            let auxBytes = try checkedMultiply(
-                auxElements, UInt64(MemoryLayout<UInt16>.size), field: field)
-            return (shape, bitCount / 8, auxBytes)
+            return (shape, sizes.weightBytes, sizes.auxBytes)
         }
 
         func requireAffine(_ name: String,
@@ -594,9 +591,8 @@ extension Model {
             }
             let expected = try affineSizes(
                 rows: rows, columns: columns, slot: slot, field: name)
-            let primaryAlignment: UInt64 = slot.weightBits == 4
-                ? UInt64(MemoryLayout<UInt16>.alignment)
-                : 1
+            let primaryAlignment = UInt64(
+                Quantization.affineWeightAlignment(bits: slot.weightBits))
             guard entry.dtype == GTurboFormatV1.DType.u32.rawValue,
                   entry.shape.0 == expected.shape.0,
                   entry.shape.1 == expected.shape.1,

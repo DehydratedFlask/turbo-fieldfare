@@ -27,6 +27,89 @@ public enum Quantization {
         Float(bitPattern: UInt32(bits) << 16)
     }
 
+    // MARK: - Affine payload sizes
+
+    /// Byte sizes of one affine-quantized projection whose weights are stored
+    /// as packed `UInt32` columns.
+    public struct AffineSizes: Sendable, Equatable {
+        /// Packed `UInt32` columns per row (`columns * bits / 32`).
+        public let packedColumns: Int
+        /// Packed weight payload bytes (`rows * packedColumns * 4`).
+        public let weightBytes: UInt64
+        /// Bytes of each BF16 companion array (`rows * (columns / groupSize) * 2`).
+        /// Scales and biases each own one array of this size.
+        public let auxBytes: UInt64
+    }
+
+    public enum AffineError: Error, Equatable {
+        case unsupportedBits(Int)
+        case columnsNotDivisible(columns: Int, groupSize: Int)
+        case packedColumnsNotIntegral(columns: Int, bits: Int)
+    }
+
+    /// Size arithmetic for 4-, 6-, and 8-bit affine payloads.
+    ///
+    /// `packedColumns` must divide exactly: a packed source width is only a
+    /// valid `UInt32` column count when `columns * bits` is a multiple of 32.
+    /// A non-positive group size or a negative dimension fails closed as
+    /// `columnsNotDivisible`, and multiplicative overflow is reported through
+    /// `packedColumnsNotIntegral` — the shape cannot be represented as packed
+    /// columns either way.
+    public static func affineSizes(rows: Int,
+                                   columns: Int,
+                                   bits: Int,
+                                   groupSize: Int) throws -> AffineSizes {
+        guard bits == 4 || bits == 6 || bits == 8 else {
+            throw AffineError.unsupportedBits(bits)
+        }
+        guard groupSize > 0, rows >= 0, columns >= 0,
+              columns % groupSize == 0 else {
+            throw AffineError.columnsNotDivisible(columns: columns,
+                                                  groupSize: groupSize)
+        }
+        let rowsU = UInt64(rows)
+        let (scaledColumns, scaledOverflow) = UInt64(columns)
+            .multipliedReportingOverflow(by: UInt64(bits))
+        guard !scaledOverflow, scaledColumns % 32 == 0 else {
+            throw AffineError.packedColumnsNotIntegral(columns: columns, bits: bits)
+        }
+        let packedColumns = scaledColumns / 32
+        let groups = UInt64(columns / groupSize)
+
+        let (weightElements, weightOverflow) = rowsU
+            .multipliedReportingOverflow(by: packedColumns)
+        let (weightBytes, weightBytesOverflow) = weightElements
+            .multipliedReportingOverflow(by: 4)
+        let (auxElements, auxOverflow) = rowsU.multipliedReportingOverflow(by: groups)
+        let (auxBytes, auxBytesOverflow) = auxElements
+            .multipliedReportingOverflow(by: 2)
+        guard !weightOverflow, !weightBytesOverflow,
+              !auxOverflow, !auxBytesOverflow,
+              let packed = Int(exactly: packedColumns) else {
+            throw AffineError.packedColumnsNotIntegral(columns: columns, bits: bits)
+        }
+        return AffineSizes(packedColumns: packed,
+                           weightBytes: weightBytes,
+                           auxBytes: auxBytes)
+    }
+
+    /// Byte alignment required of a packed affine weight payload. 4-bit
+    /// nibbles need 2-byte alignment and 6-bit packed columns are read as
+    /// `UInt32`, so they need 4. 8-bit payloads stay byte-addressed (one byte
+    /// per logical element), and existing Gemma packs place them at offsets
+    /// that are only 2-byte aligned because a 2-byte `layer_scalar` precedes
+    /// the next layer — see `docs/SYSTEM_DESIGN.md`. Widths outside 4/6/8
+    /// report the strictest value; callers validate widths through
+    /// `affineSizes` first.
+    public static func affineWeightAlignment(bits: Int) -> Int {
+        switch bits {
+        case 4:  return MemoryLayout<UInt16>.alignment
+        case 6:  return MemoryLayout<UInt32>.alignment
+        case 8:  return MemoryLayout<UInt8>.alignment
+        default: return MemoryLayout<UInt32>.alignment
+        }
+    }
+
     // MARK: - INT4 affine
 
     /// MLX `affine` 4-bit row. Packed unsigned nibbles, BF16 scale + bias per

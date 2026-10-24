@@ -374,7 +374,8 @@ enum RepackPlanner {
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
                 let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
-                let logical = logicalShape(forPackedSource: weight.shape, bits: spec.bits)
+                let logical = try logicalShape(forPackedSource: weight.shape,
+                                               bits: spec.bits, name: name)
 
                 let wOff = fileCursor
                 let wSize = weight.sizeBytes
@@ -460,7 +461,9 @@ enum RepackPlanner {
 
             let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
             let perExpertSourceShape = Array(w.shape.dropFirst())
-            let logicalPerExpert = logicalShape(forPackedSource: perExpertSourceShape, bits: spec.bits)
+            let logicalPerExpert = try logicalShape(
+                forPackedSource: perExpertSourceShape, bits: spec.bits,
+                name: "\(name) (per expert)")
             let scalesLogical = Array(s.shape.dropFirst())
             let biasesLogical = Array(b.shape.dropFirst())
 
@@ -515,12 +518,28 @@ enum RepackPlanner {
         return out
     }
 
-    /// Logical shape of a packed quantized tensor whose source is `[D0,..,Dn-1, Dn/factor]`.
-    private static func logicalShape(forPackedSource source: [UInt64], bits: Int) -> [UInt64] {
-        let factor = UInt64(32 / bits)
+    /// Logical shape of a packed quantized tensor whose source is
+    /// `[D0,..,Dn-1, Dn*bits/32]`. Fails closed when the packed width does not
+    /// describe a whole number of logical columns or the multiply overflows.
+    static func logicalShape(forPackedSource source: [UInt64],
+                             bits: Int,
+                             name: String = "packed tensor") throws -> [UInt64] {
+        guard bits > 0 else {
+            throw RepackError.shapeMismatch(
+                name: name,
+                detail: "quantization bits \(bits) must be positive")
+        }
         guard !source.isEmpty else { return source }
+        let packedColumns = source[source.count - 1]
+        let (bitCount, overflow) = packedColumns.multipliedReportingOverflow(by: 32)
+        guard !overflow, bitCount % UInt64(bits) == 0 else {
+            throw RepackError.shapeMismatch(
+                name: name,
+                detail: "packed width \(packedColumns) columns at \(bits) bits "
+                    + "is not a whole number of logical columns")
+        }
         var out = source
-        out[out.count - 1] = source[source.count - 1] * factor
+        out[out.count - 1] = bitCount / UInt64(bits)
         return out
     }
 
