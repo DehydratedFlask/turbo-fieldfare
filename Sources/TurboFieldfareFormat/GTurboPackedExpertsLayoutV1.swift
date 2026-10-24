@@ -70,8 +70,7 @@ package enum GTurboPackedExpertsLayoutCodec {
         try GTurboV1StructuralValidator.validate(
             layout,
             numLayers: layout.numLayers,
-            moeLayerMask: moeLayerMask
-                ?? Array(repeating: 1, count: layout.numLayers))
+            moeLayerMask: moeLayerMask)
         return layout
     }
 
@@ -80,8 +79,7 @@ package enum GTurboPackedExpertsLayoutCodec {
         try GTurboV1StructuralValidator.validate(
             layout,
             numLayers: layout.numLayers,
-            moeLayerMask: moeLayerMask
-                ?? Array(repeating: 1, count: layout.numLayers))
+            moeLayerMask: moeLayerMask)
         let encoder = JSONEncoder()
         do {
             let object = try JSONSerialization.jsonObject(with: encoder.encode(layout))
@@ -97,30 +95,40 @@ package enum GTurboPackedExpertsLayoutCodec {
 
 package enum GTurboV1StructuralValidator {
     package static func validate(_ layout: GTurboPackedExpertsLayoutV1) throws {
-        try validate(layout,
-                     numLayers: layout.numLayers,
-                     moeLayerMask: Array(repeating: 1, count: layout.numLayers))
+        try validate(layout, numLayers: layout.numLayers, moeLayerMask: nil)
     }
 
     /// Validates a MoE-only layout against the checkpoint's layer mask: one
-    /// unique entry for every MoE layer and none for a dense layer.
+    /// unique entry for every MoE layer and none for a dense layer. A `nil`
+    /// mask means "every layer is MoE" and is applied without allocating a
+    /// replacement array, so corrupt metadata throws instead of trapping.
     package static func validate(_ layout: GTurboPackedExpertsLayoutV1,
                                  numLayers: Int,
-                                 moeLayerMask: [Int]) throws {
+                                 moeLayerMask: [Int]? = nil) throws {
         guard layout.numLayers > 0, layout.expertsPerLayer > 0,
               layout.expertStride > 0,
               layout.expertStride % GTurboFormatV1.alignmentBytes == 0,
-              numLayers == layout.numLayers,
-              moeLayerMask.count == numLayers,
-              moeLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }),
-              layout.layers.count == moeLayerMask.filter({ $0 == 1 }).count else {
+              numLayers == layout.numLayers else {
+            throw GTurboFormatError.invalid(field: "layout", reason: "invalid dimensions or stride")
+        }
+        if let moeLayerMask {
+            guard moeLayerMask.count == numLayers,
+                  moeLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }) else {
+                throw GTurboFormatError.invalid(field: "layout",
+                                                reason: "invalid dimensions or stride")
+            }
+        }
+        let expectedLayerCount = moeLayerMask?.reduce(0) {
+            $1 == 1 ? $0 + 1 : $0
+        } ?? numLayers
+        guard layout.layers.count == expectedLayerCount else {
             throw GTurboFormatError.invalid(field: "layout", reason: "invalid dimensions or stride")
         }
         var layerIDs = Set<Int>()
         var layerFiles = Set<String>()
         for layer in layout.layers {
             guard layer.layer >= 0, layer.layer < numLayers,
-                  moeLayerMask[layer.layer] == 1,
+                  (moeLayerMask?[layer.layer] ?? 1) == 1,
                   layerIDs.insert(layer.layer).inserted else {
                 throw GTurboFormatError.invalid(field: "layout.layers", reason: "duplicate or invalid layer")
             }
@@ -224,9 +232,7 @@ package enum GTurboV1StructuralValidator {
             throw GTurboFormatError.invalid(field: "manifest/layout",
                                             reason: "dimension mismatch")
         }
-        let mask = moeLayerMask
-            ?? Array(repeating: 1, count: manifestNumLayers)
-        try validate(layout, numLayers: manifestNumLayers, moeLayerMask: mask)
+        try validate(layout, numLayers: manifestNumLayers, moeLayerMask: moeLayerMask)
         let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                           layout.expertStride,
                                                           field: "layout.layerSize")

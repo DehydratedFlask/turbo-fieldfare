@@ -719,6 +719,32 @@ private extension GTurboManifestArchV1 {
         }
     }
 
+    @Test(arguments: [0, -1])
+    func rejectsNonPositiveNumLayersInsteadOfTrapping(numLayers: Int) throws {
+        let layout = GTurboPackedExpertsLayoutV1(
+            expertStride: GTurboFormatV1.alignmentBytes,
+            numLayers: numLayers,
+            expertsPerLayer: 1,
+            layers: [])
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboV1StructuralValidator.validate(layout)
+        }
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboV1StructuralValidator.validate(
+                layout, numLayers: numLayers, moeLayerMask: nil)
+        }
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboPackedExpertsLayoutCodec.encode(layout)
+        }
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboV1StructuralValidator.crossValidate(
+                manifestNumLayers: numLayers, manifestExpertsPerLayer: 1,
+                manifestExpertStride: GTurboFormatV1.alignmentBytes,
+                manifestFileSizes: [:], layout: layout,
+                moeLayerMask: nil)
+        }
+    }
+
     @Test func rejectsTensorOutsideExpertBlob() throws {
         let base = FormatFixture.layout()
         let invalid = GTurboSubTensorV1(
