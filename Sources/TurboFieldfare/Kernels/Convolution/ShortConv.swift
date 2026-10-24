@@ -8,9 +8,11 @@ import Metal
 ///   conv = w0 * Bx[t-2] + w1 * Bx[t-1] + w2 * Bx[t]
 ///
 /// with weight layout `[channels, 3]`, `weight[channel * 3 + tap]`, FP16. The
-/// cache stores gated values, not conv outputs, and there is no activation
-/// inside these kernels. Task 15's runner owns the rewind ring; this type only
-/// owns one two-row state.
+/// installed pack stores these taps BF16; convert them once at load to FP16.
+/// Binding the pack's BF16 tensor to this `half*` slot is not diagnosed and
+/// yields plausible-looking wrong numbers. The cache stores gated values, not
+/// conv outputs, and there is no activation inside these kernels. Task 15's
+/// runner owns the rewind ring; this type only owns one two-row state.
 final class ShortConv {
 
     private let decodePipeline: MTLComputePipelineState
@@ -48,7 +50,10 @@ final class ShortConv {
 
     /// `tokens` positions at once. `stateIn[0]` is `Bx[t-2]` and `stateIn[1]` is
     /// `Bx[t-1]` for the first chunk position; `stateOut` receives the chunk's
-    /// last two gated rows, oldest first. `stateIn` is read-only.
+    /// last two gated rows, oldest first. `stateIn` is read-only. `stateIn` and
+    /// `stateOut` must not alias: the `t == 0` `stateOut` write races the
+    /// `t == 1` `stateIn` read, so pass a distinct buffer (or non-overlapping
+    /// offsets) and copy `stateOut` into the live state afterwards.
     func encodePrefill(commandBuffer: MTLCommandBuffer,
                        bx: MTLBuffer, bxOffset: Int = 0,
                        weight: MTLBuffer, weightOffset: Int = 0,

@@ -10,11 +10,15 @@ using namespace metal;
 // Layout:
 //   bx      : [tokens, channels] row-major, FP16.
 //   weight  : [channels, 3] FP16, `weight[channel * 3 + tap]`; tap 0 is the
-//             oldest position, tap 2 the current one. No bias.
+//             oldest position, tap 2 the current one. No bias. The installed
+//             pack stores these taps BF16; convert them once at load to FP16.
+//             Binding the pack's BF16 tensor here is not diagnosed and yields
+//             plausible-looking wrong numbers.
 //   state   : [2, channels] FP16, oldest first. Decode shifts it in place; the
 //             prefill variant reads `stateIn` and writes `stateOut` so callers
-//             can keep replay history. Both rows hold gated values `Bx`, not
-//             conv outputs.
+//             can keep replay history. `stateIn` and `stateOut` must not alias
+//             in prefill: the `t == 0` stateOut write would race the `t == 1`
+//             stateIn read. Both rows hold gated values `Bx`, not conv outputs.
 //
 // There is no activation and no cross-channel mixing: every channel is an
 // independent 3-tap filter.
