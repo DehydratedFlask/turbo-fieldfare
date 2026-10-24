@@ -60,7 +60,23 @@ enum GTurboJSON {
             tieWordEmbeddings: arch.tieWordEmbeddings,
             attentionKEqV: arch.attentionKEqV,
             hiddenActivation: arch.hiddenActivation,
-            fullAttentionLayerMask: arch.fullAttentionLayerMask.map(Int.init))
+            fullAttentionLayerMask: arch.fullAttentionLayerMask.map(Int.init),
+            // Leave the Gemma manifest's optional fields absent so its bytes
+            // stay identical to the pre-LFM writer.
+            family: arch.family == .gemma4 ? nil : arch.family,
+            layerTypes: arch.layerTypes,
+            moeLayerMask: wireMoELayerMask(arch.moeLayerMask),
+            attentionScale: arch.attentionScale,
+            rmsNormUnitOffset: arch.rmsNormUnitOffset,
+            ropeStyle: arch.ropeStyle,
+            convKernelSize: arch.convKernelSize,
+            routerKind: arch.routerKind,
+            sharedExpert: arch.hasSharedExpert,
+            embeddingScaledBySqrtHidden: arch.embeddingScaledBySqrtHidden,
+            numDenseLayers: arch.numDenseLayers,
+            routerNormalizeTopK: arch.routerNormalizeTopK,
+            routerBias: arch.routerBias,
+            routedScalingFactor: arch.routedScalingFactor)
         func slot(_ name: String) throws -> GTurboManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(
@@ -73,10 +89,18 @@ enum GTurboJSON {
                 biasType: "BF16",
                 groupSize: plan.baseGroupSize)
         }
+        // LFM has no affine router slot: its router is an F32 resident tensor
+        // and the family's manifest gate requires `quant.router` to be absent.
+        let routerSlot: GTurboManifestQuantSlotV1?
+        if arch.family == .lfm2Moe {
+            routerSlot = nil
+        } else {
+            routerSlot = try slot("router")
+        }
         let quant = GTurboManifestQuantV1(
             embedding: try slot("embedding"),
             attention: try slot("attention"),
-            router: try slot("router"),
+            router: routerSlot,
             sharedExpert: try slot("sharedExpert"),
             routedExpert: try slot("routedExpert"))
         var wireFiles: [String: GTurboManifestFileV1] = [:]
@@ -166,6 +190,14 @@ enum GTurboJSON {
                 expertStride: expertStride,
                 numLayers: arch.numLayers,
                 expertsPerLayer: plan.layers.first?.expertsPerLayer ?? 0,
-                layers: layers))
+                layers: layers),
+            moeLayerMask: wireMoELayerMask(arch.moeLayerMask))
+    }
+
+    /// An all-ones mask is the historical every-layer-is-MoE shape. Omitting
+    /// it keeps Gemma manifests and layouts byte-identical.
+    private static func wireMoELayerMask(_ mask: [UInt8]?) -> [Int]? {
+        guard let mask, mask.contains(0) else { return nil }
+        return mask.map { Int($0) }
     }
 }

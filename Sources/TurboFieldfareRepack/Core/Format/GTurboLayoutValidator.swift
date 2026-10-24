@@ -6,11 +6,21 @@ enum GTurboLayoutValidator {
                                 plan: RepackPlan,
                                 audit: RepackAudit? = nil) throws {
         let data = try Posix.readBoundedData(path, maximumBytes: 16 * 1024 * 1024)
+        let moeLayerMask = plan.arch.moeLayerMask?.map { Int($0) }
         let layout: GTurboPackedExpertsLayoutV1
-        do { layout = try GTurboPackedExpertsLayoutCodec.decode(data) }
+        do { layout = try GTurboPackedExpertsLayoutCodec.decode(
+            data, moeLayerMask: moeLayerMask) }
         catch {
             throw RepackError.configurationInvalid(
                 detail: "layout.json validation failed: \(error)")
+        }
+        if let moeLayerMask {
+            let expectedLayers = Set(
+                moeLayerMask.indices.filter { moeLayerMask[$0] == 1 })
+            guard Set(layout.layers.map(\.layer)) == expectedLayers else {
+                throw RepackError.configurationInvalid(
+                    detail: "layout.json validation failed: MoE layer set mismatch")
+            }
         }
         var validatedLogicalExperts = 0
         for layer in layout.layers {

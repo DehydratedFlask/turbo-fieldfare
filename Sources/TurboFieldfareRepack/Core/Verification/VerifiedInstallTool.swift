@@ -48,7 +48,8 @@ public enum VerifiedInstallTool {
             maxBytes: layoutMaxBytes)
         let layoutSize = UInt64(layoutData.count)
         let layoutSha = hashMetadata(layoutData)
-        let layout = try loadLayout(data: layoutData)
+        let layout = try loadLayout(
+            data: layoutData, moeLayerMask: manifest.arch.moeLayerMask)
         try validatePackedExpertLayout(manifest: manifest, layout: layout)
         guard layoutSize == layoutManifestEntry.size else {
             throw RepackError.configurationInvalid(
@@ -137,9 +138,11 @@ public enum VerifiedInstallTool {
         }
     }
 
-    private static func loadLayout(data: Data) throws -> GTurboPackedExpertsLayoutV1 {
+    private static func loadLayout(data: Data,
+                                   moeLayerMask: [Int]?) throws -> GTurboPackedExpertsLayoutV1 {
         do {
-            return try GTurboPackedExpertsLayoutCodec.decode(data)
+            return try GTurboPackedExpertsLayoutCodec.decode(
+                data, moeLayerMask: moeLayerMask)
         } catch {
             throw RepackError.configurationInvalid(detail: "packed_experts/layout.json invalid: \(error)")
         }

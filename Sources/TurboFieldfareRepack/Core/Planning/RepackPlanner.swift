@@ -249,6 +249,24 @@ enum RepackPlanner {
         // declared override count for the output manifest audit.
         let bitsOverrideCount = meta.bitsOverrides.count
 
+        switch arch.family {
+        case .gemma4:
+            return try planGemma(meta: meta, arch: arch, registry: registry,
+                                 outputDir: outputDir,
+                                 bitsOverrideCount: bitsOverrideCount)
+        case .lfm2Moe:
+            return try LFMRepackPlanner.plan(meta: meta, arch: arch,
+                                             registry: registry,
+                                             outputDir: outputDir,
+                                             bitsOverrideCount: bitsOverrideCount)
+        }
+    }
+
+    private static func planGemma(meta: IndexLoader.SourceMetadata,
+                                  arch: ArchInfo,
+                                  registry: [String: SourceTensor],
+                                  outputDir: String,
+                                  bitsOverrideCount: Int) throws -> RepackPlan {
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
@@ -422,7 +440,7 @@ enum RepackPlanner {
 
     // MARK: - Layer planning
 
-    private static func planLayerFile(path: String, layer: Int,
+    static func planLayerFile(path: String, layer: Int,
                                       gateName: String, upName: String, downName: String,
                                       registry: [String: SourceTensor],
                                       meta: IndexLoader.SourceMetadata,
@@ -501,16 +519,16 @@ enum RepackPlanner {
 
     // MARK: - Helpers
 
-    private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
+    static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
         switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3 }
     }
 
-    private static func roundUpToPage(_ v: UInt64) -> UInt64 {
+    static func roundUpToPage(_ v: UInt64) -> UInt64 {
         let p = Layout.pageBytes
         return ((v + p - 1) / p) * p
     }
 
-    private static func padTo4(_ s: [UInt64]) -> [UInt32] {
+    static func padTo4(_ s: [UInt64]) -> [UInt32] {
         var out: [UInt32] = []
         out.reserveCapacity(4)
         for v in s.prefix(4) { out.append(UInt32(v)) }
