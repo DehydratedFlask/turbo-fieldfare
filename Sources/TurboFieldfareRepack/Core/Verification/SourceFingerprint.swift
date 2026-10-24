@@ -4,7 +4,9 @@ import Foundation
 /// importer has been validated against a fresh upload of the source.
 public enum SourceFingerprint {
     public static let knownFingerprints: [String: String] = [
-        SupportedModelSource.repoID: SupportedModelSource.sourceIndexSHA256,
+        ModelSourceCatalog.gemma4.repoID: ModelSourceCatalog.gemma4.sourceIndexSHA256,
+        ModelSourceCatalog.lfm2_5_24B_A2B.repoID:
+            ModelSourceCatalog.lfm2_5_24B_A2B.sourceIndexSHA256,
     ]
 
     /// Returns the recognised model ID for a given index.json SHA-256, or nil.

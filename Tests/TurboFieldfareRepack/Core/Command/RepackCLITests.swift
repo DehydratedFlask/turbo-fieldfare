@@ -16,6 +16,27 @@ struct RepackCLITests {
         #expect(result.stderr.contains("mutually exclusive"))
     }
 
+    @Test func unknownModelSourceIsRejectedBeforeNetwork() throws {
+        let output = temporaryOutput("unknown-source")
+        defer { clean(output) }
+        let result = try run([
+            "--output", output,
+            "--model-source", "llama",
+        ])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("unknown model source"))
+    }
+
+    @Test func modelSourceRequiresAValue() throws {
+        let output = temporaryOutput("missing-source")
+        defer { clean(output) }
+        let result = try run(["--output", output, "--model-source"])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("missing value for --model-source"))
+    }
+
     @Test func resumeWithoutStateFailsBeforeNetwork() throws {
         let output = temporaryOutput("missing-resume")
         defer { clean(output) }

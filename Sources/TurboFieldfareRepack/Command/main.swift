@@ -3,7 +3,8 @@ import TurboFieldfareRepackCore
 
 private let usage = """
 Usage:
-  TurboFieldfareRepack --output <model.gturbo> [--overwrite] [--resume]
+  TurboFieldfareRepack --output <model.gturbo>
+                       [--model-source <gemma4|lfm2_moe>] [--overwrite] [--resume]
   TurboFieldfareRepack --discard-partial --output <model.gturbo>
   TurboFieldfareRepack --verify-install --input-gturbo <model.gturbo>
   TurboFieldfareRepack --vision-output <model.vision.gturbo>
@@ -20,188 +21,22 @@ Usage:
                        --vision-output <model.vision.gturbo>
   TurboFieldfareRepack --help
 
-The installer streams the supported Gemma 4 checkpoint from Hugging Face and
-repackages it without materializing the source checkpoint on disk. Set HF_TOKEN
-only if Hugging Face requests authentication. A cancelled or interrupted
-download can be continued with --resume or removed with --discard-partial.
+The installer streams a supported checkpoint from Hugging Face and repackages
+it without materializing the source checkpoint on disk. --model-source selects
+the pinned source and defaults to gemma4. Set HF_TOKEN only if Hugging Face
+requests authentication. A cancelled or interrupted download can be continued
+with --resume or removed with --discard-partial.
 
 The optional image companion pack installs beside an existing text model and
 is bound to it. Without the pack the text runtime is unchanged; image input is
 simply unavailable.
 """
 
-private struct Arguments {
-    var output: String?
-    var overwrite = false
-    var resume = false
-    var discardPartial = false
-    var verifyInstall = false
-    var inputGTurbo: String?
-    var visionOutput: String?
-    var textModel: String?
-    var verifyVisionInstall = false
-    var activateVisionInstall = false
-    var removeVisionInstall = false
-
-    static func parse(_ values: [String]) throws -> Arguments {
-        var parsed = Arguments()
-        var index = 1
-        while index < values.count {
-            let flag = values[index]
-            switch flag {
-            case "--help":
-                throw ParseError.help
-            case "--overwrite":
-                parsed.overwrite = true
-                index += 1
-            case "--resume":
-                parsed.resume = true
-                index += 1
-            case "--discard-partial":
-                parsed.discardPartial = true
-                index += 1
-            case "--verify-install":
-                parsed.verifyInstall = true
-                index += 1
-            case "--verify-vision-install":
-                parsed.verifyVisionInstall = true
-                index += 1
-            case "--activate-vision-install":
-                parsed.activateVisionInstall = true
-                index += 1
-            case "--remove-vision-install":
-                parsed.removeVisionInstall = true
-                index += 1
-            case "--vision-output":
-                guard index + 1 < values.count else {
-                    throw ParseError.missingValue(flag)
-                }
-                parsed.visionOutput = values[index + 1]
-                index += 2
-            case "--text-model":
-                guard index + 1 < values.count else {
-                    throw ParseError.missingValue(flag)
-                }
-                parsed.textModel = values[index + 1]
-                index += 2
-            case "--output", "--input-gturbo":
-                guard index + 1 < values.count else {
-                    throw ParseError.missingValue(flag)
-                }
-                if flag == "--output" {
-                    parsed.output = values[index + 1]
-                } else {
-                    parsed.inputGTurbo = values[index + 1]
-                }
-                index += 2
-            default:
-                throw ParseError.unknown(flag)
-            }
-        }
-
-        let visionModes = [parsed.verifyVisionInstall,
-                           parsed.activateVisionInstall,
-                           parsed.removeVisionInstall].filter { $0 }.count
-        guard visionModes <= 1 else {
-            throw ParseError.invalidMode("vision install modes are mutually exclusive")
-        }
-        if visionModes == 1 || parsed.visionOutput != nil {
-            guard parsed.visionOutput != nil else {
-                throw ParseError.missingRequired("--vision-output")
-            }
-            guard parsed.output == nil, parsed.inputGTurbo == nil,
-                  !parsed.verifyInstall else {
-                throw ParseError.invalidMode(
-                    "vision install operations do not accept text install arguments")
-            }
-            // Discard runs first below, so accepting it alongside another mode
-            // would silently perform the discard and exit 0 without ever doing
-            // what was asked.
-            guard !(parsed.discardPartial && visionModes == 1) else {
-                throw ParseError.invalidMode(
-                    "--discard-partial is mutually exclusive with the other vision "
-                        + "install operations")
-            }
-            if parsed.removeVisionInstall || parsed.discardPartial {
-                guard parsed.textModel == nil, !parsed.overwrite, !parsed.resume else {
-                    throw ParseError.invalidMode(
-                        "this vision operation only accepts --vision-output")
-                }
-            } else if parsed.verifyVisionInstall || parsed.activateVisionInstall {
-                guard parsed.textModel != nil else {
-                    throw ParseError.missingRequired("--text-model")
-                }
-                // Neither reads a download, so a transfer flag here is a
-                // request this mode cannot honour rather than a no-op.
-                guard !parsed.overwrite, !parsed.resume else {
-                    throw ParseError.invalidMode(
-                        "this vision operation only accepts --vision-output and "
-                            + "--text-model")
-                }
-            } else {
-                guard parsed.textModel != nil else {
-                    throw ParseError.missingRequired("--text-model")
-                }
-            }
-            return parsed
-        }
-        guard parsed.textModel == nil else {
-            throw ParseError.invalidMode("--text-model requires --vision-output")
-        }
-        guard !(parsed.resume && parsed.discardPartial) else {
-            throw ParseError.invalidMode("--resume and --discard-partial are mutually exclusive")
-        }
-        if parsed.discardPartial {
-            guard parsed.output != nil else {
-                throw ParseError.missingRequired("--output")
-            }
-            guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall else {
-                throw ParseError.invalidMode("--discard-partial only accepts --output")
-            }
-            return parsed
-        }
-        if parsed.verifyInstall {
-            guard parsed.inputGTurbo != nil else {
-                throw ParseError.missingRequired("--input-gturbo")
-            }
-            guard parsed.output == nil, !parsed.overwrite, !parsed.resume else {
-                throw ParseError.invalidMode("verification accepts only --input-gturbo")
-            }
-        } else {
-            guard parsed.output != nil else {
-                throw ParseError.missingRequired("--output")
-            }
-            guard parsed.inputGTurbo == nil else {
-                throw ParseError.invalidMode("--input-gturbo requires --verify-install")
-            }
-        }
-        return parsed
-    }
-}
-
-private enum ParseError: Error, CustomStringConvertible {
-    case help
-    case unknown(String)
-    case missingValue(String)
-    case missingRequired(String)
-    case invalidMode(String)
-
-    var description: String {
-        switch self {
-        case .help: return "help"
-        case .unknown(let flag): return "unknown argument: \(flag)"
-        case .missingValue(let flag): return "missing value for \(flag)"
-        case .missingRequired(let flag): return "missing required argument: \(flag)"
-        case .invalidMode(let message): return message
-        }
-    }
-}
-
 private func printError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
+private func runVisionInstall(_ arguments: RepackArguments) async -> Int32? {
     guard let visionOutput = arguments.visionOutput else { return nil }
 
     if arguments.discardPartial {
@@ -282,10 +117,10 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
 }
 
 private func run(_ values: [String]) async -> Int32 {
-    let arguments: Arguments
+    let arguments: RepackArguments
     do {
-        arguments = try Arguments.parse(values)
-    } catch ParseError.help {
+        arguments = try RepackArguments.parse(Array(values.dropFirst()))
+    } catch RepackArgumentError.help {
         print(usage)
         return 0
     } catch {
@@ -322,7 +157,12 @@ private func run(_ values: [String]) async -> Int32 {
     }
 
     guard let output = arguments.output else { return 2 }
+    guard let descriptor = ModelSourceCatalog.descriptor(id: arguments.modelSource) else {
+        printError("error: unknown model source: \(arguments.modelSource)")
+        return 2
+    }
     let options = SupportedModelSource.installOptions(
+        for: descriptor,
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
@@ -331,7 +171,7 @@ private func run(_ values: [String]) async -> Int32 {
         let progress = InstallProgressReporter()
         let result = try await RemoteStreamingRepacker(options: options).run(
             progress: { progress($0) })
-        print("Installed \(SupportedModelSource.displayName)")
+        print("Installed \(descriptor.displayName)")
         print("Source revision: \(result.resolvedCommit)")
         print("Model: \(result.outputDir)")
         return 0

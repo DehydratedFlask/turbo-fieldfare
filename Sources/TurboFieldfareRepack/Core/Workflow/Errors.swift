@@ -33,6 +33,7 @@ public enum RepackError: Error, CustomStringConvertible {
 
     case indexJsonInvalid(path: String, detail: String)
     case configJsonInvalid(path: String, detail: String)
+    case unsupportedModelFamily(String)
     case quantOverrideCountMismatch(expected: Int, actual: Int, sample: [String])
 
     case missingTensor(name: String)
@@ -100,6 +101,8 @@ public enum RepackError: Error, CustomStringConvertible {
             return "safetensors \(p): tensor \(n) ends at \(end), file size \(sz)"
         case .indexJsonInvalid(let p, let d): return "index.json \(p) invalid: \(d)"
         case .configJsonInvalid(let p, let d): return "config.json \(p) invalid: \(d)"
+        case .unsupportedModelFamily(let family):
+            return "unsupported model family: \(family)"
         case .quantOverrideCountMismatch(let exp, let got, let sample):
             return "config.json quantization overrides: expected \(exp), got \(got); sample=\(sample.prefix(5))"
         case .missingTensor(let n): return "expected tensor missing: \(n)"
