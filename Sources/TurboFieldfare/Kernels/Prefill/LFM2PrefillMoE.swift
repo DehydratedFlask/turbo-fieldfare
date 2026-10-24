@@ -3,7 +3,7 @@ import Metal
 /// Gated activation used by the grouped routed MoE prefill phase-1 kernel.
 ///
 /// Gemma 4 (the default) keeps `gelu_pytorch_tanh`; LFM2.5 selects SiLU. The
-/// shader carries both behind function constant 50 so one scheduler serves
+/// shader carries both behind function constant 90 so one scheduler serves
 /// both families without a second kernel.
 enum PrefillMoEActivation: Sendable {
     case gelu
@@ -14,9 +14,10 @@ enum PrefillMoEActivation: Sendable {
 ///
 /// Thin validation wrapper over `PrefillGroupedRoutedMoE`: the scheduler and
 /// argument-buffer layout are shared with Gemma, while LFM2.5 requires top-4
-/// selection from 64 experts and the SiLU gate/up activation. Prefill routing
-/// itself (sigmoid + bias, normalized unbiased weights) is produced by
-/// `PrefillRouter` and handed in as `PrefillMoEGroupedRoutes`.
+/// selection from 64 experts and the SiLU gate/up activation. The prefill
+/// routing handed in as `PrefillMoEGroupedRoutes` must be produced by an LFM2
+/// router (sigmoid + bias, normalized unbiased weights); that router is not
+/// implemented yet and belongs to a later task.
 final class LFM2PrefillMoE {
     static let topK: UInt32 = 4
     static let numExperts: UInt32 = 64

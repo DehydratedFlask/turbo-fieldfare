@@ -63,10 +63,13 @@ import TurboFieldfareValidationSupport
 
     /// The prefill scheduler is shared with Gemma; `LFM2PrefillMoE` must select
     /// its SiLU activation variant. One token routed to four experts pins the
-    /// activation and the per-pair reduction.
+    /// activation and the per-pair reduction. Fixtures use O(1) hidden values
+    /// and O(0.1) weights so routed partials are O(0.1): at small magnitudes
+    /// SiLU and GELU round to the same FP16 value and the test would be
+    /// vacuous. `d = 64` and `f = 128` also make a D/F swap observable.
     @Test func prefillRoutedMoEUsesSiluAndMatchesCPU() throws {
         let d = 64
-        let f = 64
+        let f = 128
         let topK = 4
         let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
             [
@@ -79,14 +82,17 @@ import TurboFieldfareValidationSupport
             topK: topK,
             numExperts: 16,
             tileExpertCount: 16)
-        let pool = PrefillGroupedRoutedMoETests.makeSyntheticExpertPool(
-            numExperts: 16, d: d, f: f)
-        let hidden: [Float16] = (0..<d).map {
-            Float16(Float(($0 % 13) - 6) * 0.03)
+        let pool = Self.makePrefillExpertPool(numExperts: 16, d: d, f: f)
+        var rng = SplitMix64(seed: 0x9F3A_11E2)
+        let hidden: [Float16] = (0..<d).map { _ in
+            Float16(rng.uniform(-1, 1))
         }
-        let expected = Self.cpuPrefillRoutePartialsSilu(
+        let siluExpected = Self.cpuPrefillRoutePartials(
             routes: routes, hidden: hidden, hiddenStride: d,
-            pool: pool, topK: topK, d: d, f: f)
+            pool: pool, topK: topK, d: d, f: f, activation: .silu)
+        let geluExpected = Self.cpuPrefillRoutePartials(
+            routes: routes, hidden: hidden, hiddenStride: d,
+            pool: pool, topK: topK, d: d, f: f, activation: .gelu)
 
         let context = try MetalContext()
         let kernel = try LFM2PrefillMoE(context: context)
@@ -139,10 +145,17 @@ import TurboFieldfareValidationSupport
 
         let actual = Fp16Buffer.readHalf(
             outputBuffer, count: routes.queryCount * topK * d)
-        let maxAbsoluteError = zip(actual, expected).reduce(Float(0)) {
-            max($0, abs(Float($1.0) - Float($1.1)))
+        let siluError = Self.maxAbsoluteError(actual, siluExpected)
+        let geluError = Self.maxAbsoluteError(actual, geluExpected)
+        let expectedMagnitude = siluExpected.reduce(Float(0)) {
+            max($0, abs(Float($1)))
         }
-        #expect(maxAbsoluteError < 0.0015, "maxAbsoluteError=\(maxAbsoluteError)")
+        #expect(expectedMagnitude > 0.02,
+                "fixture below FP16 resolution: max=\(expectedMagnitude)")
+        #expect(siluError < 0.0015, "maxAbsoluteError=\(siluError)")
+        // A GELU kernel (or an empty output) must not satisfy the SiLU check.
+        #expect(geluError > 0.0015,
+                "GELU reference unexpectedly matched: error=\(geluError)")
     }
 
     // MARK: - Fixtures
@@ -259,14 +272,20 @@ import TurboFieldfareValidationSupport
         return Array(output.prefix(x.count))
     }
 
-    private static func cpuPrefillRoutePartialsSilu(
+    private enum PrefillActivation {
+        case silu
+        case gelu
+    }
+
+    private static func cpuPrefillRoutePartials(
         routes: PrefillMoEGroupedRoutes,
         hidden: [Float16],
         hiddenStride: Int,
         pool: PrefillGroupedRoutedMoETests.SyntheticExpertPool,
         topK: Int,
         d: Int,
-        f: Int
+        f: Int,
+        activation: PrefillActivation
     ) -> [Float16] {
         var out = [Float16](repeating: -99, count: routes.queryCount * topK * d)
         for pair in routes.sortedPairs {
@@ -287,7 +306,10 @@ import TurboFieldfareValidationSupport
                     sOff: Int(pool.offsets.upSOff),
                     bOff: Int(pool.offsets.upBOff),
                     row: row, n: d, x: x)
-                acts[row] = Float16(silu(gate) * up)
+                switch activation {
+                case .silu: acts[row] = Float16(silu(gate) * up)
+                case .gelu: acts[row] = Float16(gelu(gate) * up)
+                }
             }
             let actFloat = acts.map { Float($0) }
             let outBase = (Int(pair.token) * topK + Int(pair.rank)) * d
@@ -304,10 +326,83 @@ import TurboFieldfareValidationSupport
         return out
     }
 
+    /// Local prefill expert pool with O(0.1) affine weights. Built through the
+    /// shared quantized-block helper so the on-disk layout matches production
+    /// expert blobs while keeping every routed partial above FP16 resolution.
+    private static func makePrefillExpertPool(
+        numExperts: Int,
+        d: Int,
+        f: Int
+    ) -> PrefillGroupedRoutedMoETests.SyntheticExpertPool {
+        var allBytes: [UInt8] = []
+        var offsets: MoEExpertOffsets?
+        var stride = 0
+        for expert in 0..<numExperts {
+            var bytes: [UInt8] = []
+            func rows(_ count: Int, _ columns: Int, _ role: Int) -> [[Float]] {
+                (0..<count).map { row in
+                    (0..<columns).map { column in
+                        let sign: Float =
+                            (row + column + role + expert) % 2 == 0 ? 1 : -1
+                        let wobble = Float(
+                            (row * 3 + column * 5 + role + expert) % 7) * 0.004
+                        return sign * (0.10 + wobble)
+                    }
+                }
+            }
+            func append(_ projectionRows: [[Float]])
+                -> (w: UInt32, s: UInt32, b: UInt32) {
+                let w = UInt32(bytes.count)
+                PrefillGroupedRoutedMoETests.appendProjection(
+                    rows: projectionRows, to: &bytes, component: .packed)
+                let s = UInt32(bytes.count)
+                PrefillGroupedRoutedMoETests.appendProjection(
+                    rows: projectionRows, to: &bytes, component: .scales)
+                let b = UInt32(bytes.count)
+                PrefillGroupedRoutedMoETests.appendProjection(
+                    rows: projectionRows, to: &bytes, component: .biases)
+                return (w, s, b)
+            }
+
+            let gate = append(rows(f, d, 0))
+            let up = append(rows(f, d, 1))
+            let down = append(rows(d, f, 2))
+            let current = MoEExpertOffsets(
+                gateWOff: gate.w, gateSOff: gate.s, gateBOff: gate.b,
+                upWOff: up.w, upSOff: up.s, upBOff: up.b,
+                downWOff: down.w, downSOff: down.s, downBOff: down.b)
+            if offsets == nil {
+                offsets = current
+                stride = bytes.count
+            } else {
+                #expect(stride == bytes.count)
+                #expect(offsets!.gateWOff == current.gateWOff)
+                #expect(offsets!.downBOff == current.downBOff)
+            }
+            allBytes.append(contentsOf: bytes)
+        }
+        return PrefillGroupedRoutedMoETests.SyntheticExpertPool(
+            bytes: allBytes, offsets: offsets!, stride: stride)
+    }
+
+    private static func maxAbsoluteError(_ actual: [Float16],
+                                         _ expected: [Float16]) -> Float {
+        zip(actual, expected).reduce(Float(0)) {
+            max($0, abs(Float($1.0) - Float($1.1)))
+        }
+    }
+
     // MARK: - Padding / blob helpers
 
     private static func silu(_ x: Float) -> Float {
         x / (1 + exp(-x))
+    }
+
+    private static func gelu(_ x: Float) -> Float {
+        let cube = x * x * x
+        var inner = 0.7978845608028654 * (x + 0.044715 * cube)
+        inner = min(max(inner, -20), 20)
+        return 0.5 * x * (1 + tanh(inner))
     }
 
     private static func paddedHalves(_ x: [Float]) -> [Float16] {
