@@ -559,11 +559,10 @@ public final class RemoteStreamingRepacker {
         return false
     }
 
-    private func writeManifest(plan: RepackPlan,
-                               partialDir: String,
-                               metadata: IndexLoader.SourceMetadata,
-                               expertStride: UInt64,
-                               resolvedCommit: String) throws {
+    /// Derives the manifest's per-slot bit widths from the planned resident
+    /// entries and routed-expert slices. Gemma's names and results are
+    /// unchanged; LFM contributes its own embedding and dense-FFN names.
+    static func inferBitWidths(plan: RepackPlan) -> GTurboJSON.QuantBitWidths {
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
@@ -571,7 +570,9 @@ public final class RemoteStreamingRepacker {
             sharedExpert: 8,
             routedExpert: 4)
         for e in plan.resident.entries {
-            if e.name == "language_model.model.embed_tokens.weight", let s = e.quantSpec {
+            if e.name == "language_model.model.embed_tokens.weight"
+                || e.name == "model.embed_tokens.weight",
+               let s = e.quantSpec {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight"), let s = e.quantSpec {
@@ -580,7 +581,9 @@ public final class RemoteStreamingRepacker {
             if e.name.hasSuffix(".router.proj.weight"), let s = e.quantSpec {
                 bits.router = s.bits
             }
-            if e.name.hasSuffix(".mlp.gate_proj.weight"), let s = e.quantSpec {
+            if e.name.hasSuffix(".mlp.gate_proj.weight")
+                || e.name.hasSuffix(".feed_forward.gate_proj.weight"),
+               let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }
         }
@@ -588,6 +591,15 @@ public final class RemoteStreamingRepacker {
            let routedBits = layer.subTensors.first?.bitsForWeights {
             bits.routedExpert = routedBits
         }
+        return bits
+    }
+
+    private func writeManifest(plan: RepackPlan,
+                               partialDir: String,
+                               metadata: IndexLoader.SourceMetadata,
+                               expertStride: UInt64,
+                               resolvedCommit: String) throws {
+        let bits = Self.inferBitWidths(plan: plan)
         let files = audit.outputFiles.map {
             ($0.relativePath, GTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }

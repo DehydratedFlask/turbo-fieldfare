@@ -42,7 +42,7 @@ struct RepackArgumentsTests {
         #expect(lfm.repoID == "LiquidAI/LFM2.5-24B-A2B-MLX-4bit")
         #expect(lfm.revision == "667408d494bde191c2cb9dd4f4549827816b9275")
         #expect(lfm.approximateDownloadBytes == 13_567_188_992)
-        #expect(lfm.installedBytes == 13_567_188_992)
+        #expect(lfm.installedBytes == 13_572_000_000)
         #expect(lfm.reserveBytes == 1_073_741_824)
         #expect(lfm.defaultContext == 8_192)
     }

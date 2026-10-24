@@ -66,8 +66,9 @@ public enum ModelSourceCatalog {
         defaultExpertCacheSlots: 16,
         supportsVision: true)
 
-    /// LFM2.5 24B-A2B MLX 4-bit. `installedBytes` starts at the pinned source
-    /// byte count as a safe upper bound; the planner's exact size is tighter.
+    /// LFM2.5 24B-A2B MLX 4-bit. `installedBytes` covers the planner's
+    /// measured text model (13,567,221,760 bytes) plus manifest, layout,
+    /// tokenizer, and receipt metadata, rounded up conservatively.
     public static let lfm2_5_24B_A2B = ModelSourceDescriptor(
         id: "lfm2_moe",
         family: .lfm2Moe,
@@ -77,7 +78,7 @@ public enum ModelSourceCatalog {
         sourceIndexSHA256:
             "7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a",
         approximateDownloadBytes: 13_567_188_992,
-        installedBytes: 13_567_188_992,
+        installedBytes: 13_572_000_000,
         reserveBytes: 1_073_741_824,
         defaultFilename: "lfm2.5-24b-a2b.gturbo",
         defaultContext: 8_192,
