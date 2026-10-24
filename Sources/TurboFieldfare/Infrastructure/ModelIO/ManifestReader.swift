@@ -109,7 +109,7 @@ public enum ManifestReader {
                     pageSize: Int(GTurboFormatV1.alignmentBytes))
             }
             try GTurboManifestCodec.validate(wire)
-            manifest = Manifest(wire: wire)
+            manifest = try Manifest(wire: wire)
         } catch let error as ModelError {
             throw error
         } catch {
@@ -235,17 +235,21 @@ private extension ManifestQuantSlot {
 }
 
 private extension ManifestQuant {
-    init(wire: GTurboManifestQuantV1) {
+    init(wire: GTurboManifestQuantV1) throws {
+        guard let router = wire.router else {
+            throw ModelError.indexCorrupt(
+                detail: "manifest.quant.router is required by the Gemma runtime")
+        }
         self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
                   attention: ManifestQuantSlot(wire: wire.attention),
-                  router: ManifestQuantSlot(wire: wire.router),
+                  router: ManifestQuantSlot(wire: router),
                   sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
                   routedExpert: ManifestQuantSlot(wire: wire.routedExpert))
     }
 }
 
 private extension Manifest {
-    init(wire: GTurboManifestV1) {
+    init(wire: GTurboManifestV1) throws {
         self.init(magic: wire.magic,
                   versionMajor: wire.versionMajor,
                   versionMinor: wire.versionMinor,
@@ -253,7 +257,7 @@ private extension Manifest {
                   modelID: wire.modelID,
                   sourceSnapshotHash: wire.sourceSnapshotHash,
                   arch: ManifestArch(wire: wire.arch),
-                  quant: wire.quant.map(ManifestQuant.init(wire:)),
+                  quant: try wire.quant.map(ManifestQuant.init(wire:)),
                   files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
                   expertsPerLayer: wire.expertsPerLayer,
                   numLayers: wire.numLayers,

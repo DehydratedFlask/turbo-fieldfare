@@ -48,6 +48,63 @@ private enum FormatFixture {
         embedding: quantSlot, attention: quantSlot, router: quantSlot,
         sharedExpert: quantSlot, routedExpert: quantSlot)
 
+    /// LFM2.5-shaped layer plan: two dense conv layers followed by a
+    /// conv/full-attention mix, ten full-attention layers in total.
+    static let lfmLayerTypes: [LayerType] = (0..<40).map { index in
+        index < 2 || index % 4 != 3 ? .conv : .fullAttention
+    }
+
+    static func lfmManifest() -> GTurboManifestV1 {
+        GTurboManifestV1(
+            flags: [
+                "streamingPresent": true,
+                "turboQuantKV": false,
+                "aneSharedExpert": false,
+            ],
+            modelID: "fixture/lfm",
+            sourceSnapshotHash: "snapshot",
+            arch: GTurboManifestArchV1(
+                hiddenSize: 64, ffnIntermediate: 128, moeIntermediateSize: 32,
+                numHeads: 4, numKVHeads: 2, numFullKVHeads: 2,
+                headDim: 16, fullHeadDim: 16, vocabSize: 1024,
+                slidingWindow: 0, finalLogitSoftcap: 0,
+                ropeTheta: 10_000, fullRopeTheta: 10_000,
+                partialRotaryFactor: 1, numLayers: 40, numExperts: 4,
+                topKExperts: 1, tieWordEmbeddings: true, attentionKEqV: false,
+                hiddenActivation: "silu",
+                fullAttentionLayerMask: lfmLayerTypes.map {
+                    $0 == .fullAttention ? 1 : 0
+                },
+                family: .lfm2Moe,
+                layerTypes: lfmLayerTypes,
+                moeLayerMask: Array(repeating: 0, count: 2)
+                    + Array(repeating: 1, count: 38),
+                attentionScale: 0.125,
+                rmsNormUnitOffset: false,
+                ropeStyle: .neoxFull,
+                convKernelSize: 3,
+                routerKind: .lfm2SigmoidTopKBias,
+                sharedExpert: false,
+                embeddingScaledBySqrtHidden: false,
+                numDenseLayers: 2,
+                routerNormalizeTopK: true,
+                routerBias: true,
+                routedScalingFactor: 1),
+            quant: GTurboManifestQuantV1(
+                embedding: quantSlot, attention: quantSlot,
+                sharedExpert: quantSlot, routedExpert: quantSlot),
+            files: [
+                "model_weights.bin": GTurboManifestFileV1(size: 16_448, sha256: zeroSHA),
+                "packed_experts/layout.json": GTurboManifestFileV1(size: 1, sha256: zeroSHA),
+                "packed_experts/layer_00.bin": GTurboManifestFileV1(
+                    size: 4 * GTurboFormatV1.alignmentBytes, sha256: zeroSHA),
+            ],
+            expertsPerLayer: 4,
+            numLayers: 40,
+            expertStride: GTurboFormatV1.alignmentBytes,
+            bitWidthOverridesHonored: 40)
+    }
+
     static func layout(explicitIDs: Bool = true,
                        explicitRanks: Bool = true) -> GTurboPackedExpertsLayoutV1 {
         let tensor = GTurboSubTensorV1(
@@ -165,6 +222,121 @@ private enum FormatFixture {
         root["files"] = files
         let data = try JSONSerialization.data(withJSONObject: root)
         #expect(throws: GTurboFormatError.self) { try GTurboManifestCodec.decode(data) }
+    }
+
+    @Test func gemmaManifestWithoutOptionalTraitsDecodesAsBefore() throws {
+        let wire = makeGemmaManifest()
+        let decoded = try GTurboManifestCodec.decode(try GTurboManifestCodec.encode(wire))
+        #expect(decoded.arch.family == nil)
+        #expect(decoded.arch.layerTypes == nil)
+        #expect(decoded.arch.moeLayerMask == nil)
+        #expect(decoded.quant?.router != nil)
+    }
+
+    @Test func lfmManifestRoundTripsOptionalTraits() throws {
+        let wire = makeLFMManifest()
+        let decoded = try GTurboManifestCodec.decode(try GTurboManifestCodec.encode(wire))
+        #expect(decoded.arch.family == .lfm2Moe)
+        #expect(decoded.arch.layerTypes?.count == 40)
+        #expect(Array(decoded.arch.moeLayerMask?.prefix(2) ?? []) == [0, 0])
+        #expect(decoded.arch.convKernelSize == 3)
+        #expect(decoded.arch.routerKind == .lfm2SigmoidTopKBias)
+        #expect(decoded.quant?.router == nil)
+    }
+
+    @Test func zeroSlidingWindowRequiresLayerTypesWithoutSliding() throws {
+        let base = makeLFMManifest()
+        let layerTypes = try #require(base.arch.layerTypes)
+        let withSliding = layerTypes.enumerated().map { index, type in
+            index == 1 ? LayerType.slidingAttention : type
+        }
+        var wire = base.with(
+            arch: base.arch.with(slidingWindow: 0, layerTypes: withSliding))
+        #expect(throws: GTurboFormatError.self) { try GTurboManifestCodec.validate(wire) }
+        wire = base.with(arch: base.arch.with(slidingWindow: 0, layerTypes: layerTypes))
+        #expect(throws: Never.self) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func denseLayerMaskMustBeAPrefix() throws {
+        let wire = makeLFMManifest().with(
+            arch: makeLFMManifest().arch.with(
+                moeLayerMask: [1, 0] + Array(repeating: 1, count: 38)))
+        #expect(throws: GTurboFormatError.self) { try GTurboManifestCodec.validate(wire) }
+    }
+
+    @Test func gemmaManifestRequiresRouterSlot() throws {
+        let wire = makeGemmaManifest().with(quant: makeGemmaManifest().quant!.with(router: nil))
+        #expect(throws: GTurboFormatError.self) { try GTurboManifestCodec.validate(wire) }
+    }
+}
+
+private func makeGemmaManifest() -> GTurboManifestV1 { FormatFixture.manifest() }
+
+private func makeLFMManifest() -> GTurboManifestV1 { FormatFixture.lfmManifest() }
+
+private extension GTurboManifestV1 {
+    func with(arch: GTurboManifestArchV1) -> GTurboManifestV1 {
+        GTurboManifestV1(
+            magic: magic, versionMajor: versionMajor, versionMinor: versionMinor,
+            flags: flags, modelID: modelID, sourceSnapshotHash: sourceSnapshotHash,
+            arch: arch, quant: quant, files: files,
+            expertsPerLayer: expertsPerLayer, numLayers: numLayers,
+            expertStride: expertStride,
+            bitWidthOverridesHonored: bitWidthOverridesHonored)
+    }
+
+    func with(quant: GTurboManifestQuantV1?) -> GTurboManifestV1 {
+        GTurboManifestV1(
+            magic: magic, versionMajor: versionMajor, versionMinor: versionMinor,
+            flags: flags, modelID: modelID, sourceSnapshotHash: sourceSnapshotHash,
+            arch: arch, quant: quant, files: files,
+            expertsPerLayer: expertsPerLayer, numLayers: numLayers,
+            expertStride: expertStride,
+            bitWidthOverridesHonored: bitWidthOverridesHonored)
+    }
+}
+
+private extension GTurboManifestQuantV1 {
+    func with(router: GTurboManifestQuantSlotV1?) -> GTurboManifestQuantV1 {
+        GTurboManifestQuantV1(
+            embedding: embedding, attention: attention, router: router,
+            sharedExpert: sharedExpert, routedExpert: routedExpert)
+    }
+}
+
+private extension GTurboManifestArchV1 {
+    func with(slidingWindow: Int? = nil,
+              layerTypes: [LayerType]? = nil,
+              moeLayerMask: [Int]? = nil) -> GTurboManifestArchV1 {
+        GTurboManifestArchV1(
+            hiddenSize: hiddenSize, ffnIntermediate: ffnIntermediate,
+            moeIntermediateSize: moeIntermediateSize,
+            numHeads: numHeads, numKVHeads: numKVHeads,
+            numFullKVHeads: numFullKVHeads,
+            headDim: headDim, fullHeadDim: fullHeadDim, vocabSize: vocabSize,
+            slidingWindow: slidingWindow ?? self.slidingWindow,
+            finalLogitSoftcap: finalLogitSoftcap,
+            ropeTheta: ropeTheta, fullRopeTheta: fullRopeTheta,
+            partialRotaryFactor: partialRotaryFactor,
+            numLayers: numLayers, numExperts: numExperts,
+            topKExperts: topKExperts, tieWordEmbeddings: tieWordEmbeddings,
+            attentionKEqV: attentionKEqV,
+            hiddenActivation: hiddenActivation,
+            fullAttentionLayerMask: fullAttentionLayerMask,
+            family: family,
+            layerTypes: layerTypes ?? self.layerTypes,
+            moeLayerMask: moeLayerMask ?? self.moeLayerMask,
+            attentionScale: attentionScale,
+            rmsNormUnitOffset: rmsNormUnitOffset,
+            ropeStyle: ropeStyle,
+            convKernelSize: convKernelSize,
+            routerKind: routerKind,
+            sharedExpert: sharedExpert,
+            embeddingScaledBySqrtHidden: embeddingScaledBySqrtHidden,
+            numDenseLayers: numDenseLayers,
+            routerNormalizeTopK: routerNormalizeTopK,
+            routerBias: routerBias,
+            routedScalingFactor: routedScalingFactor)
     }
 }
 

@@ -32,6 +32,20 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let attentionKEqV: Bool
     package let hiddenActivation: String
     package let fullAttentionLayerMask: [Int]
+    package let family: ModelFamily?
+    package let layerTypes: [LayerType]?
+    package let moeLayerMask: [Int]?
+    package let attentionScale: Double?
+    package let rmsNormUnitOffset: Bool?
+    package let ropeStyle: RopeStyle?
+    package let convKernelSize: Int?
+    package let routerKind: RouterKind?
+    package let sharedExpert: Bool?
+    package let embeddingScaledBySqrtHidden: Bool?
+    package let numDenseLayers: Int?
+    package let routerNormalizeTopK: Bool?
+    package let routerBias: Bool?
+    package let routedScalingFactor: Double?
 
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -40,7 +54,21 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  ropeTheta: Double, fullRopeTheta: Double,
                  partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
-                 hiddenActivation: String, fullAttentionLayerMask: [Int]) {
+                 hiddenActivation: String, fullAttentionLayerMask: [Int],
+                 family: ModelFamily? = nil,
+                 layerTypes: [LayerType]? = nil,
+                 moeLayerMask: [Int]? = nil,
+                 attentionScale: Double? = nil,
+                 rmsNormUnitOffset: Bool? = nil,
+                 ropeStyle: RopeStyle? = nil,
+                 convKernelSize: Int? = nil,
+                 routerKind: RouterKind? = nil,
+                 sharedExpert: Bool? = nil,
+                 embeddingScaledBySqrtHidden: Bool? = nil,
+                 numDenseLayers: Int? = nil,
+                 routerNormalizeTopK: Bool? = nil,
+                 routerBias: Bool? = nil,
+                 routedScalingFactor: Double? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -62,6 +90,20 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.attentionKEqV = attentionKEqV
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.family = family
+        self.layerTypes = layerTypes
+        self.moeLayerMask = moeLayerMask
+        self.attentionScale = attentionScale
+        self.rmsNormUnitOffset = rmsNormUnitOffset
+        self.ropeStyle = ropeStyle
+        self.convKernelSize = convKernelSize
+        self.routerKind = routerKind
+        self.sharedExpert = sharedExpert
+        self.embeddingScaledBySqrtHidden = embeddingScaledBySqrtHidden
+        self.numDenseLayers = numDenseLayers
+        self.routerNormalizeTopK = routerNormalizeTopK
+        self.routerBias = routerBias
+        self.routedScalingFactor = routedScalingFactor
     }
 }
 
@@ -85,13 +127,13 @@ package struct GTurboManifestQuantSlotV1: Codable, Equatable, Sendable {
 package struct GTurboManifestQuantV1: Codable, Equatable, Sendable {
     package let embedding: GTurboManifestQuantSlotV1
     package let attention: GTurboManifestQuantSlotV1
-    package let router: GTurboManifestQuantSlotV1
+    package let router: GTurboManifestQuantSlotV1?
     package let sharedExpert: GTurboManifestQuantSlotV1
     package let routedExpert: GTurboManifestQuantSlotV1
 
     package init(embedding: GTurboManifestQuantSlotV1,
                  attention: GTurboManifestQuantSlotV1,
-                 router: GTurboManifestQuantSlotV1,
+                 router: GTurboManifestQuantSlotV1? = nil,
                  sharedExpert: GTurboManifestQuantSlotV1,
                  routedExpert: GTurboManifestQuantSlotV1) {
         self.embedding = embedding
@@ -196,7 +238,7 @@ package enum GTurboManifestCodec {
               arch.moeIntermediateSize > 0, arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
-              arch.vocabSize > 0, arch.slidingWindow > 0,
+              arch.vocabSize > 0, arch.slidingWindow >= 0,
               arch.topKExperts > 0, arch.topKExperts <= arch.numExperts,
               arch.finalLogitSoftcap.isFinite,
               arch.ropeTheta.isFinite, arch.ropeTheta > 0,
@@ -209,14 +251,95 @@ package enum GTurboManifestCodec {
             throw GTurboFormatError.invalid(
                 field: "manifest.arch", reason: "invalid architecture values")
         }
+        if let layerTypes = arch.layerTypes {
+            guard layerTypes.count == arch.numLayers else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.layerTypes",
+                    reason: "count disagrees with numLayers")
+            }
+            for (index, layerType) in layerTypes.enumerated() {
+                let expectedMask = layerType == .fullAttention ? 1 : 0
+                guard arch.fullAttentionLayerMask[index] == expectedMask else {
+                    throw GTurboFormatError.invalid(
+                        field: "manifest.arch.layerTypes.\(index)",
+                        reason: "layer type disagrees with fullAttentionLayerMask")
+                }
+            }
+        }
+        if arch.slidingWindow == 0 {
+            guard let layerTypes = arch.layerTypes,
+                  !layerTypes.contains(.slidingAttention) else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.slidingWindow",
+                    reason: "zero sliding window requires layerTypes without sliding attention")
+            }
+        }
+        if let moeLayerMask = arch.moeLayerMask {
+            guard moeLayerMask.count == arch.numLayers,
+                  moeLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }) else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.moeLayerMask", reason: "invalid MoE layer mask")
+            }
+            if let numDenseLayers = arch.numDenseLayers {
+                guard numDenseLayers >= 0, numDenseLayers <= moeLayerMask.count,
+                      moeLayerMask.prefix(numDenseLayers).allSatisfy({ $0 == 0 }),
+                      moeLayerMask.dropFirst(numDenseLayers).allSatisfy({ $0 == 1 }) else {
+                    throw GTurboFormatError.invalid(
+                        field: "manifest.arch.moeLayerMask",
+                        reason: "dense layers must be a leading prefix")
+                }
+            }
+        }
+        if let attentionScale = arch.attentionScale {
+            guard attentionScale.isFinite, attentionScale > 0 else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.attentionScale", reason: "expected a positive finite value")
+            }
+        }
+        if let convKernelSize = arch.convKernelSize {
+            guard convKernelSize >= 0 else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.convKernelSize", reason: "expected a non-negative value")
+            }
+        }
+        if let routedScalingFactor = arch.routedScalingFactor {
+            guard routedScalingFactor.isFinite else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.routedScalingFactor", reason: "expected a finite value")
+            }
+        }
+        switch arch.family ?? .gemma4 {
+        case .gemma4:
+            if let quant = manifest.quant {
+                guard quant.router != nil else {
+                    throw GTurboFormatError.invalid(
+                        field: "manifest.quant.router",
+                        reason: "gemma4 manifests require a router slot")
+                }
+            }
+        case .lfm2Moe:
+            guard arch.layerTypes != nil, arch.moeLayerMask != nil,
+                  arch.convKernelSize == 3,
+                  arch.routerKind == .lfm2SigmoidTopKBias,
+                  arch.sharedExpert == false,
+                  arch.embeddingScaledBySqrtHidden == false,
+                  arch.numDenseLayers != nil,
+                  arch.routerNormalizeTopK != nil,
+                  arch.routerBias != nil,
+                  manifest.quant?.router == nil else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch.family", reason: "incomplete lfm2_moe traits")
+            }
+        }
         if let quant = manifest.quant {
-            for (name, slot) in [
+            var slots: [(String, GTurboManifestQuantSlotV1)] = [
                 ("embedding", quant.embedding),
                 ("attention", quant.attention),
-                ("router", quant.router),
                 ("sharedExpert", quant.sharedExpert),
                 ("routedExpert", quant.routedExpert),
-            ] {
+            ]
+            if let router = quant.router { slots.append(("router", router)) }
+            for (name, slot) in slots {
                 guard slot.weightBits > 0, slot.weightBits <= 32,
                       slot.groupSize > 0,
                       !slot.scheme.isEmpty, !slot.scaleType.isEmpty,
