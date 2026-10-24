@@ -16,6 +16,9 @@ constant constexpr uint kPrefillMaxTileExperts = 16;
 constant constexpr float kPrefillGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kPrefillGeluCubicCoeff = 0.044715f;
 constant uint FC_PREFILL_KV_RING_CAP [[function_constant(76)]];
+// LFM2.5 routed MoE uses SiLU; Gemma 4 keeps the GELU default when the constant
+// is undefined. Only the grouped routed phase-1 kernel reads this.
+constant bool FC_PREFILL_MOE_SILU [[function_constant(90)]];
 
 static inline float prefill_gelu_pytorch_tanh(float x) {
     const float x3 = x * x * x;
@@ -23,6 +26,14 @@ static inline float prefill_gelu_pytorch_tanh(float x) {
     inner = clamp(inner, -20.0f, 20.0f);
     return 0.5f * x * (1.0f + tanh(inner));
 }
+
+static inline float prefill_moe_gate_activation(float x) {
+    if (is_function_constant_defined(FC_PREFILL_MOE_SILU) && FC_PREFILL_MOE_SILU) {
+        return x / (1.0f + exp(-x));
+    }
+    return prefill_gelu_pytorch_tanh(x);
+}
+
 kernel void prefill_embed_lookup_int4_block(
     device const uint8_t* table     [[buffer(0)]],
     device const bfloat*  scales    [[buffer(1)]],
@@ -633,7 +644,7 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     gate_up_act_scratch[index] = half(gate);
     gate_up_act_scratch[row_elements + index] = half(up);
     gate_up_act_scratch[2u * row_elements + index] =
-        half(prefill_gelu_pytorch_tanh(gate) * up);
+        half(prefill_moe_gate_activation(gate) * up);
 }
 
 kernel void prefill_grouped_routed_moe_batched_down(
