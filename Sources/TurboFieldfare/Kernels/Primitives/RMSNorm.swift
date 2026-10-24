@@ -4,7 +4,8 @@ import Metal
 /// Swift wrapper for the RMSNorm kernel family.
 ///
 ///   inv  = 1 / sqrt(mean(x[i]^2) + eps)
-///   y[i] = x[i] * inv * weight[i]            // BF16 weight
+///   y[i] = x[i] * inv * weight[i]            // BF16 weight; Gemma gains
+///   y[i] = x[i] * inv * weight[i]            // BF16 weight; LFM, no unit offset
 ///   y[i] = x[i] * inv                        // .noScale
 ///
 /// One row per dispatch — callers needing per-head dispatch (q/k_norm) loop
@@ -13,6 +14,7 @@ import Metal
 final class RMSNorm {
 
     private let psoBF16: MTLComputePipelineState
+    private let psoStandard: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
     private let psoBF16PerHead: MTLComputePipelineState
     private let psoNoScalePerHead: MTLComputePipelineState
@@ -25,6 +27,7 @@ final class RMSNorm {
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
+        self.psoStandard = try context.pipeline("rmsnorm_standard_fp16")
         self.psoNoScale  = try context.pipeline("rmsnorm_no_scale")
         self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead")
         self.psoNoScalePerHead = try context.pipeline("rmsnorm_no_scale_perhead")
@@ -57,6 +60,28 @@ final class RMSNorm {
                             eps: Float) {
         encodeWeighted(commandBuffer: commandBuffer,
                        pso: d == 2816 ? psoBF16D2816 : psoBF16,
+                       x: x, xOffset: xOffset,
+                       weight: weight, weightOffset: weightOffset,
+                       out: out, outOffset: outOffset,
+                       d: d, eps: eps)
+    }
+
+    /// Encode the standard (no unit offset) BF16-weight variant.
+    ///
+    /// LFM2.5's `operator_norm` / `ffn_norm` / `q_layernorm` / `k_layernorm`
+    /// apply their BF16 gain directly:
+    ///
+    ///   y[i] = weight[i] * x[i] / sqrt(mean(x^2) + eps)
+    ///
+    /// Unlike `encodeBF16W`, there is **no** `1 +` added to the weight.
+    func encodeStandard(commandBuffer: MTLCommandBuffer,
+                                x: MTLBuffer, xOffset: Int = 0,
+                                weight: MTLBuffer, weightOffset: Int = 0,
+                                out: MTLBuffer, outOffset: Int = 0,
+                                d: UInt32,
+                                eps: Float) {
+        encodeWeighted(commandBuffer: commandBuffer,
+                       pso: psoStandard,
                        x: x, xOffset: xOffset,
                        weight: weight, weightOffset: weightOffset,
                        out: out, outOffset: outOffset,

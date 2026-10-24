@@ -92,6 +92,40 @@ void rmsnorm_bf16w(
     }
 }
 
+// Standard RMSNorm — no unit offset. LFM2.5's operator_norm / ffn_norm /
+// q_layernorm / k_layernorm ship a BF16 gain that is applied directly:
+//
+//   y[i] = weight[i] * x[i] * rsqrt(mean(x^2) + eps)
+//
+// Gemma's norms follow the unit-offset (`1 + weight`) convention; this is the
+// explicit LFM entry point that never adds that offset. Same reduction, same
+// bindings, different gain convention.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_standard_fp16(
+    device const half*   x          [[buffer(0)]],   // [D] FP16
+    device const bfloat* weight     [[buffer(1)]],   // [D] BF16
+    device       half*   out        [[buffer(2)]],   // [D] FP16
+    constant     uint&   D          [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const uint DD = rms_fc_d(D);
+    const float inv = rms_block_inv(x, DD, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups,
+                                    partial);
+
+    for (uint i = lid; i < DD; i += lsize) {
+        float xv = float(x[i]);
+        float wv = float(weight[i]);
+        out[i] = half(xv * inv * wv);
+    }
+}
+
 // Gemma 4 applies q_norm/k_norm
 // (BF16 weight, shared across heads) and v_norm (no-scale) to each attention
 // head independently. These kernels process all heads in one dispatch, with
