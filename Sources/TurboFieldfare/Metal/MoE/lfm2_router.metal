@@ -124,6 +124,91 @@ kernel void lfm2_router_select_top4(
     }
 }
 
+// Prefill router: one threadgroup per token row. Each thread accumulates whole
+// expert rows in FP32, then thread 0 runs the same top-4 selection the decode
+// kernel uses — `sigmoid(logit) + expert_bias` for selection, unbiased sigmoid
+// values normalized with `sum + 1e-6` and scaled by `routedScalingFactor`.
+// Gemma's `prefill_router_gemma4_block` is deliberately not reused: it applies
+// the Gemma softmax/gain contract and unpacks INT4-affine router weights.
+kernel void prefill_lfm2_router_block(
+    device const float* W                   [[buffer(0)]],   // [num_experts, D] FP32
+    device const float* expert_bias         [[buffer(1)]],   // [num_experts] FP32
+    device const half*  hidden              [[buffer(2)]],   // [T, hidden_stride]
+    device uint*        out_indices         [[buffer(3)]],   // [T, top_k]
+    device half*        out_weights         [[buffer(4)]],   // [T, top_k]
+    constant uint&      T                   [[buffer(5)]],
+    constant uint&      num_experts         [[buffer(6)]],
+    constant uint&      D                   [[buffer(7)]],
+    constant uint&      top_k               [[buffer(8)]],
+    constant uint&      hidden_stride       [[buffer(9)]],
+    constant float&     routed_scaling_factor [[buffer(10)]],
+    uint                row                 [[threadgroup_position_in_grid]],
+    uint                tid                 [[thread_position_in_threadgroup]],
+    uint                tg_size             [[threads_per_threadgroup]]
+) {
+    if (row >= T || top_k != kLFM2MaxStreamedExperts) return;
+
+    threadgroup float scores[256];
+    const uint NE = min(num_experts, 256u);
+    device const half* row_hidden = hidden + row * hidden_stride;
+
+    for (uint e = tid; e < NE; e += tg_size) {
+        device const float* w_row = W + uint(e) * D;
+        float acc = 0.0f;
+        for (uint i = 0; i < D; ++i) {
+            acc = fma(w_row[i], float(row_hidden[i]), acc);
+        }
+        scores[e] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid != 0u) return;
+
+    uint top_idx[kLFM2MaxStreamedExperts];
+    float top_score[kLFM2MaxStreamedExperts];
+    float top_sigmoid[kLFM2MaxStreamedExperts];
+    for (uint i = 0; i < kLFM2MaxStreamedExperts; ++i) {
+        top_idx[i] = 0u;
+        top_score[i] = -INFINITY;
+        top_sigmoid[i] = 0.0f;
+    }
+
+    for (uint e = 0; e < NE; ++e) {
+        const float unbiased = lfm2_sigmoid(scores[e]);
+        const float score = unbiased + expert_bias[e];
+        if (score <= top_score[kLFM2MaxStreamedExperts - 1u]) continue;
+
+        uint pos = kLFM2MaxStreamedExperts;
+        for (uint i = 0; i < kLFM2MaxStreamedExperts; ++i) {
+            if (score > top_score[i] ||
+                (score == top_score[i] && e < top_idx[i])) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos >= kLFM2MaxStreamedExperts) continue;
+        for (uint i = kLFM2MaxStreamedExperts - 1u; i > pos; --i) {
+            top_idx[i] = top_idx[i - 1u];
+            top_score[i] = top_score[i - 1u];
+            top_sigmoid[i] = top_sigmoid[i - 1u];
+        }
+        top_idx[pos] = e;
+        top_score[pos] = score;
+        top_sigmoid[pos] = unbiased;
+    }
+
+    float sum = 0.0f;
+    for (uint i = 0; i < kLFM2MaxStreamedExperts; ++i) {
+        sum += top_sigmoid[i];
+    }
+    const float denominator = sum + kLFM2RoutingEpsilon;
+    for (uint i = 0; i < kLFM2MaxStreamedExperts; ++i) {
+        out_indices[row * top_k + i] = top_idx[i];
+        out_weights[row * top_k + i] =
+            half(top_sigmoid[i] / denominator * routed_scaling_factor);
+    }
+}
+
 kernel void lfm2_silu_mul_fp16(
     device const half* gate [[buffer(0)]],
     device const half* up [[buffer(1)]],

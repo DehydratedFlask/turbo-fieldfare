@@ -91,3 +91,51 @@ kernel void lfm2_shortconv_prefill(
         stateOut[stride + c] = bx[(tokens - 1u) * stride + c];
     }
 }
+
+// The `in_proj` GEMV writes `[B | C | x]` per row, each `channels` wide. The
+// two helpers below extract the gated products without materialising the
+// three sub-vectors: `Bx = B * x` before the convolution and `C * conv` after
+// it. `proj_stride` is `3 * channels`.
+kernel void lfm2_conv_bx_mul_fp16(
+    device const half* proj        [[buffer(0)]],   // [tokens, 3, channels]
+    device half*       bx          [[buffer(1)]],   // [tokens, channels]
+    constant uint&     tokens      [[buffer(2)]],
+    constant uint&     channels    [[buffer(3)]],
+    constant uint&     proj_stride [[buffer(4)]],
+    uint2              gid         [[thread_position_in_grid]]
+) {
+    const uint c = gid.x;
+    const uint t = gid.y;
+    if (t >= tokens || c >= channels) return;
+    const uint base = t * proj_stride;
+    bx[t * channels + c] = half(float(proj[base + c]) * float(proj[base + 2u * channels + c]));
+}
+
+kernel void lfm2_conv_gate_mul_fp16(
+    device const half* proj        [[buffer(0)]],   // [tokens, 3, channels]
+    device const half* conv        [[buffer(1)]],   // [tokens, channels]
+    device half*       out         [[buffer(2)]],   // [tokens, channels]
+    constant uint&     tokens      [[buffer(3)]],
+    constant uint&     channels    [[buffer(4)]],
+    constant uint&     proj_stride [[buffer(5)]],
+    uint2              gid         [[thread_position_in_grid]]
+) {
+    const uint c = gid.x;
+    const uint t = gid.y;
+    if (t >= tokens || c >= channels) return;
+    const uint base = t * proj_stride;
+    out[t * channels + c] = half(float(proj[base + channels + c]) * float(conv[t * channels + c]));
+}
+
+// Residual accumulate: `hidden += branch`. Kept beside the convolution ops
+// because the LFM graph uses it between the operator, dense/MoE branch, and
+// the next layer's norm.
+kernel void lfm2_residual_add_fp16(
+    device half*       hidden [[buffer(0)]],
+    device const half* branch [[buffer(1)]],
+    constant uint&     count  [[buffer(2)]],
+    uint               tid    [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    hidden[tid] = half(float(hidden[tid]) + float(branch[tid]));
+}
