@@ -233,5 +233,99 @@ import Metal
         #expect(kv.position == 1)
     }
 
+    // MARK: - LFM2.5: conv layers have no KV
 
+    private func makeLFM(maxContext: Int,
+                         fp16RingEnabled: Bool = true,
+                         maxPrefillChunkTokens: Int = 128) throws -> (MetalContext, KVCacheManager) {
+        let ctx = try MetalContext()
+        let kv = try KVCacheManager(device: ctx.device,
+                                    config: .lfm2_5_24B_A2B,
+                                    maxContext: maxContext,
+                                    fp16RingEnabled: fp16RingEnabled,
+                                    slidingWindow: 0,
+                                    maxPrefillChunkTokens: maxPrefillChunkTokens)
+        return (ctx, kv)
+    }
+
+    @Test func convLayersAllocateNoKV() throws {
+        let ctx = try MetalContext()
+        let kv = try KVCacheManager(device: ctx.device, config: .lfm2_5_24B_A2B,
+                                    maxContext: 8_192, fp16RingEnabled: true,
+                                    slidingWindow: 0, maxPrefillChunkTokens: 128)
+        #expect(kv.layerKind(0) == .conv)
+        #expect(kv.layerKind(2) == .full)
+        #expect(kv.keyBufferIfPresent(layer: 0) == nil)
+        #expect(kv.keyBufferIfPresent(layer: 2) != nil)
+        #expect(kv.maxRewindTokens == 8_192)
+    }
+
+    @Test func convLayersReportZeroKVBytes() throws {
+        let (_, kv) = try makeLFM(maxContext: 8_192)
+        for layer in 0..<ArchConfig.lfm2_5_24B_A2B.numLayers {
+            guard kv.layerKind(layer) == .conv else { continue }
+            #expect(kv.keyBufferIfPresent(layer: layer) == nil, "layer \(layer) K")
+            #expect(kv.valueBufferIfPresent(layer: layer) == nil, "layer \(layer) V")
+            #expect(kv.stride(layer: layer) == 0, "layer \(layer) stride")
+            #expect(kv.capacity(layer: layer) == 0, "layer \(layer) capacity")
+            #expect(kv.bufferLength(layer: layer) == 0, "layer \(layer) length")
+            #expect(kv.ringCapacity(layer: layer) == 0, "layer \(layer) ring")
+        }
+    }
+
+    @Test func fullAttentionLayerKindComesFromLayerTypes() throws {
+        let (_, kv) = try makeLFM(maxContext: 128)
+        let fullLayers = [2, 6, 10, 14, 18, 22, 26, 30, 34, 38]
+        for layer in 0..<ArchConfig.lfm2_5_24B_A2B.numLayers {
+            #expect(kv.layerKind(layer) == (fullLayers.contains(layer) ? .full : .conv),
+                    "layer \(layer)")
+        }
+        #expect(kv.layerKind(0) == .conv)
+        #expect(kv.layerKind(2) == .full)
+    }
+
+    /// 10 full layers x 2 (K, V) x 8 KV heads x 64 head dim x 2 bytes =
+    /// 20,480 B/token, which is exactly the admission table's KV term.
+    @Test func lfmKVBytesMatchAdmission() throws {
+        let (_, kv) = try makeLFM(maxContext: 8_192)
+        var total = 0
+        for layer in 0..<ArchConfig.lfm2_5_24B_A2B.numLayers {
+            total += kv.bufferLength(layer: layer) * 2 // K and V
+        }
+        #expect(total == Int(ContextAdmission.fp16KVBytes(config: .lfm2_5_24B_A2B,
+                                                          maxContext: 8_192)))
+        #expect(total == 167_772_160)
+        #expect(kv.stride(layer: 2) == 8 * 64 * 2)
+        #expect(kv.capacity(layer: 2) == 8_192)
+        #expect(kv.bufferLength(layer: 2) == 8_192 * 1_024)
+    }
+
+    /// No sliding-window layers means no ring slack: `maxRewindTokens` is the
+    /// whole context, and rewinding therefore never trips the ring guard.
+    @Test func lfmRewindAndResetSkipConvLayers() throws {
+        let (_, kv) = try makeLFM(maxContext: 8_192)
+        kv.advance(by: 1_000)
+        #expect(kv.maxRewindTokens == 8_192)
+        kv.rewind(to: 900)
+        #expect(kv.position == 900)
+        kv.reset()
+        #expect(kv.position == 0)
+        #expect(kv.highWaterPosition == 0)
+        kv.advance()
+        #expect(kv.position == 1)
+    }
+
+    /// Gemma keeps the mask-derived kinds it had before `LayerKind.conv`
+    /// existed: every layer is either `.swa` or `.full`.
+    @Test func gemmaLayersKeepSwaAndFullKinds() throws {
+        let (_, kv) = try makeManager(maxContext: 128)
+        #expect(kv.layerKind(0) == .swa)
+        #expect(kv.layerKind(4) == .swa)
+        #expect(kv.layerKind(5) == .full)
+        for layer in 0..<config.numLayers {
+            #expect(kv.layerKind(layer) != .conv, "layer \(layer)")
+            #expect(kv.keyBufferIfPresent(layer: layer) != nil)
+            #expect(kv.valueBufferIfPresent(layer: layer) != nil)
+        }
+    }
 }

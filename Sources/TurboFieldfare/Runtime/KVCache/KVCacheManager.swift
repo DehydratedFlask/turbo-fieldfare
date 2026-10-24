@@ -1,11 +1,14 @@
 import Foundation
 import Darwin
 import Metal
+import TurboFieldfareFormat
 
 /// Which attention variant a layer runs. Gemma 4 interleaves 25 sliding-window
 /// layers with 5 full-attention layers (the latter carry the K=V shared-tensor
-/// quirk). Sourced from `ArchConfig.fullAttentionLayerMask`.
-public enum LayerKind: Sendable { case swa, full }
+/// quirk). LFM2.5 replaces attention with a short convolution on 30 of its 40
+/// layers and runs full attention on the other 10. Sourced from
+/// `ArchConfig.layerTypes`.
+public enum LayerKind: Sendable { case swa, full, conv }
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -25,10 +28,12 @@ public struct KVView: @unchecked Sendable {
 
 /// Per-layer FP16 K/V storage for the decode loop.
 ///
-/// One K buffer and one V buffer per layer, allocated once in `init` — the
-/// decode hot path never allocates. Linear storage sizes every layer for
-/// `maxContext`; FP16 ring storage caps SWA layers to their physical capacity
-/// while full-attention layers remain linear.
+/// One K buffer and one V buffer per attention layer, allocated once in `init`
+/// — the decode hot path never allocates. Linear storage sizes every attention
+/// layer for `maxContext`; FP16 ring storage caps SWA layers to their physical
+/// capacity while full-attention layers remain linear. Conv layers
+/// (`LayerKind.conv`, LFM2.5's short convolution) carry a fixed-size hidden
+/// state instead of K/V, so they allocate nothing and report zero KV bytes.
 ///
 /// Gemma 4 full-attention layers carry the `attention_k_eq_v` quirk: K and V
 /// share the `k_proj` weight, so a single 4-bit dequant + GEMV produces the
@@ -52,8 +57,8 @@ public final class KVCacheManager {
     public let maxContext: Int
     public let fp16RingEnabled: Bool
 
-    private let kBuffers: [MTLBuffer]
-    private let vBuffers: [MTLBuffer]
+    private let kBuffers: [MTLBuffer?]
+    private let vBuffers: [MTLBuffer?]
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
     private let capacityTokens: [Int]
@@ -92,8 +97,8 @@ public final class KVCacheManager {
                                   ?? ((slidingWindow ?? config.slidingWindow) + maxPrefillChunkTokens)))
         self.slidingWindowTokens = slidingWindow ?? config.slidingWindow
 
-        var ks: [MTLBuffer] = []
-        var vs: [MTLBuffer] = []
+        var ks: [MTLBuffer?] = []
+        var vs: [MTLBuffer?] = []
         var st: [Int] = []
         var kd: [LayerKind] = []
         var caps: [Int] = []
@@ -104,9 +109,19 @@ public final class KVCacheManager {
         caps.reserveCapacity(config.numLayers)
 
         for layer in 0..<config.numLayers {
-            let isFull = config.fullAttentionLayerMask[layer] != 0
-            let stride = isFull ? fullStride : swaStride
-            let capacity = ringEnabled && !isFull ? swaCapacity : maxContext
+            let kind = Self.layerKind(config: config, layer: layer)
+            kd.append(kind)
+            // Conv layers run a fixed-size short-convolution state held by the
+            // runner; they own no rows of K/V, so they allocate nothing.
+            guard kind != .conv else {
+                ks.append(nil)
+                vs.append(nil)
+                st.append(0)
+                caps.append(0)
+                continue
+            }
+            let stride = kind == .full ? fullStride : swaStride
+            let capacity = ringEnabled && kind == .swa ? swaCapacity : maxContext
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
@@ -122,7 +137,6 @@ public final class KVCacheManager {
             vs.append(vBuf)
 
             st.append(stride)
-            kd.append(isFull ? .full : .swa)
             caps.append(capacity)
         }
 
@@ -133,13 +147,37 @@ public final class KVCacheManager {
         self.capacityTokens = caps
     }
 
+    /// Per-layer mechanism from `LayerType`. A config whose `layerTypes` is
+    /// shorter than `numLayers` (never produced by the loader) falls back to
+    /// the Gemma mask rather than indexing out of bounds.
+    private static func layerKind(config: ArchConfig, layer: Int) -> LayerKind {
+        if layer < config.layerTypes.count {
+            switch config.layerTypes[layer] {
+            case .fullAttention: return .full
+            case .slidingAttention: return .swa
+            case .conv: return .conv
+            }
+        }
+        return config.fullAttentionLayerMask[layer] != 0 ? .full : .swa
+    }
+
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }
 
-    /// Bytes per token for `layer` (K and V share the same stride).
+    /// This layer's K buffer, or `nil` for a conv layer. Callers that need to
+    /// bind a buffer should use `kSlot`/`kRange`/`keyView`, which require an
+    /// attention layer.
+    public func keyBufferIfPresent(layer: Int) -> MTLBuffer? { kBuffers[layer] }
+
+    /// This layer's V buffer, or `nil` for a conv layer.
+    public func valueBufferIfPresent(layer: Int) -> MTLBuffer? { vBuffers[layer] }
+
+    /// Bytes per token for `layer` (K and V share the same stride). Zero for
+    /// conv layers, which have no KV rows.
     public func stride(layer: Int) -> Int { strides[layer] }
 
     /// Physical token capacity for `layer`. Ring-enabled SWA layers can be
     /// smaller than `maxContext`; full layers and ring-off storage stay linear.
+    /// Zero for conv layers.
     public func capacity(layer: Int) -> Int { capacityTokens[layer] }
 
     public func ringCapacity(layer: Int) -> Int {
@@ -147,15 +185,18 @@ public final class KVCacheManager {
         return capacityTokens[layer]
     }
 
-    /// Total bytes of the K buffer for `layer`.
+    /// Total bytes of the K buffer for `layer`. Zero for conv layers.
     public func bufferLength(layer: Int) -> Int {
         return capacityTokens[layer] * strides[layer]
     }
 
-    /// Write target for this layer's K projection at `position`.
+    /// Write target for this layer's K projection at `position`. A conv layer
+    /// has no KV; asking for one is a programming error and fails the
+    /// precondition instead of force-unwrapping a missing buffer.
     public func kSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
         validateRange(start: position, count: 1)
-        return (kBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
+        let buffer = requireKV(layer: layer, isKey: true)
+        return (buffer, physicalSlot(layer: layer, position: position) * strides[layer])
     }
 
     /// Write target for this layer's V projection at `position`. Always
@@ -163,19 +204,22 @@ public final class KVCacheManager {
     /// applies different per-head norms + RoPE to K vs V; gemma4-block.md §2.2).
     public func vSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
         validateRange(start: position, count: 1)
-        return (vBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
+        let buffer = requireKV(layer: layer, isKey: false)
+        return (buffer, physicalSlot(layer: layer, position: position) * strides[layer])
     }
 
     public func kRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
-        return (kBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
+        let buffer = requireKV(layer: layer, isKey: true)
+        return (buffer, physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
 
     public func vRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
-        return (vBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
+        let buffer = requireKV(layer: layer, isKey: false)
+        return (buffer, physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
 
     public func keyView(layer: Int) -> KVView {
@@ -184,7 +228,8 @@ public final class KVCacheManager {
 
     public func keyView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
-        return KVView(buffer: kBuffers[layer], offset: 0, stride: strides[layer],
+        return KVView(buffer: requireKV(layer: layer, isKey: true), offset: 0,
+                      stride: strides[layer],
                       validTokenCount: validTokenCount, startSlot: ringStartSlot(layer: layer,
                                                                                  validTokenCount: validTokenCount))
     }
@@ -203,9 +248,21 @@ public final class KVCacheManager {
 
     public func valueView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
-        return KVView(buffer: vBuffers[layer], offset: 0, stride: strides[layer],
+        return KVView(buffer: requireKV(layer: layer, isKey: false), offset: 0,
+                      stride: strides[layer],
                       validTokenCount: validTokenCount, startSlot: ringStartSlot(layer: layer,
                                                                                  validTokenCount: validTokenCount))
+    }
+
+    /// The one documented place a nil K/V buffer is rejected. Reaching it means
+    /// a caller asked a conv layer for attention storage.
+    private func requireKV(layer: Int, isKey: Bool) -> MTLBuffer {
+        precondition(kinds[layer] != .conv,
+                     "layer \(layer) is a conv layer and has no \(isKey ? "K" : "V") cache")
+        guard let buffer = isKey ? kBuffers[layer] : vBuffers[layer] else {
+            preconditionFailure("layer \(layer) is missing its \(isKey ? "K" : "V") buffer")
+        }
+        return buffer
     }
 
     /// Advance the position cursor once the current token's K/V are written
@@ -256,8 +313,8 @@ public final class KVCacheManager {
         let pageSize = Int(getpagesize())
         var advised = Set<ObjectIdentifier>()
         for layer in 0..<config.numLayers {
-            advise(kBuffers[layer], pageSize: pageSize, seen: &advised)
-            advise(vBuffers[layer], pageSize: pageSize, seen: &advised)
+            if let k = kBuffers[layer] { advise(k, pageSize: pageSize, seen: &advised) }
+            if let v = vBuffers[layer] { advise(v, pageSize: pageSize, seen: &advised) }
         }
     }
 

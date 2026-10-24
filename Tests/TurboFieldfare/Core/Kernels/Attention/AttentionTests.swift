@@ -558,4 +558,102 @@ import TurboFieldfareValidationSupport
         #expect(relGrouped < Tolerance.fp16ChainedReduction,
                 "grouped rel=\(relGrouped) exact rel=\(relExact) at seqLen=\(seqLen)")
     }
+
+    // 32 Q heads / 8 KV heads (LFM2.5) ---------------------------------------
+
+    /// LFM2.5 runs 32 Q heads over 8 KV heads at head_dim 64. The split-KV
+    /// scratch used to be sized from the Gemma 16-head ceiling, so a 32-head
+    /// dispatch wrote 2x past `mPartial`/`dPartial`/`oPartial`.
+    private static func runAttentionAndReference(
+        _ attention: Attention,
+        context: MetalContext,
+        qHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        seqLen: Int,
+        scale: Float,
+        seed: UInt64
+    ) throws -> (actual: [Float], reference: [Float]) {
+        var rng = SeedTree(seed).key("attn-\(qHeads)q-\(kvHeads)kv-\(headDim)d-\(seqLen)t")
+        let qCount = qHeads * headDim
+        let kvCount = seqLen * kvHeads * headDim
+        let q = (0..<qCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let k = (0..<kvCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let v = (0..<kvCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+
+        guard let qBuf = Fp16Buffer.make(context.device, halves: q),
+              let kBuf = Fp16Buffer.make(context.device, halves: k),
+              let vBuf = Fp16Buffer.make(context.device, halves: v),
+              let outBuf = Fp16Buffer.make(context.device, count: qCount),
+              let cb = context.queue.makeCommandBuffer() else {
+            Issue.record("Failed to allocate buffers")
+            return ([], [])
+        }
+        attention.encodeFull(commandBuffer: cb, q: qBuf, k: kBuf, v: vBuf, out: outBuf,
+                             headDim: UInt32(headDim), numQHeads: UInt32(qHeads),
+                             numKVHeads: UInt32(kvHeads), seqLen: UInt32(seqLen),
+                             scale: scale)
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let reference = AttentionRef.apply(q: q.map(Float.init),
+                                           k: k.map(Float.init),
+                                           v: v.map(Float.init),
+                                           headDim: headDim, numQHeads: qHeads,
+                                           numKVHeads: kvHeads, seqLen: seqLen,
+                                           scale: scale)
+        return (Fp16Buffer.read(outBuf, count: qCount), reference)
+    }
+
+    private static func runAttention(
+        _ attention: Attention,
+        context: MetalContext,
+        qHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        seqLen: Int,
+        scale: Float
+    ) throws -> [Float] {
+        try runAttentionAndReference(attention, context: context,
+                                     qHeads: qHeads, kvHeads: kvHeads,
+                                     headDim: headDim, seqLen: seqLen,
+                                     scale: scale, seed: 0xA12).actual
+    }
+
+    @Test func attentionSupportsThirtyTwoQueryHeadsAndEightKVHeads() throws {
+        let ctx = try MetalContext()
+        let attention = try Attention(context: ctx, maxQHeads: 32)
+        let out = try Self.runAttention(attention, context: ctx,
+                                        qHeads: 32, kvHeads: 8, headDim: 64,
+                                        seqLen: 5, scale: 0.125)
+        #expect(out.count == 32 * 64)
+        #expect(out.allSatisfy { $0.isFinite })
+    }
+
+    /// Finite output is not enough: a 16-head-sized scratch would leave half
+    /// the partials unwritten (or overwrite head 0-15), which can still be
+    /// finite. Pin the 32-head path against the independent FP32 reference.
+    @Test func attentionThirtyTwoQueryHeadsMatchesReference() throws {
+        let ctx = try MetalContext()
+        let attention = try Attention(context: ctx, maxQHeads: 32)
+        let result = try Self.runAttentionAndReference(attention, context: ctx,
+                                                       qHeads: 32, kvHeads: 8,
+                                                       headDim: 64, seqLen: 37,
+                                                       scale: 0.125, seed: 0xA13)
+        let rel = RelError.compute(actual: result.actual, reference: result.reference)
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "32Q/8KV head_dim 64 rel=\(rel)")
+    }
+
+    /// The default initializer keeps the Gemma scratch ceiling (16 heads) and
+    /// still rejects a wider dispatch instead of writing past the allocation.
+    @Test func attentionDefaultInitKeepsSixteenHeadCeiling() throws {
+        let ctx = try MetalContext()
+        let attention = try Attention(context: ctx)
+        #expect(Attention.defaultMaxQHeads == 16)
+        let out = try Self.runAttention(attention, context: ctx,
+                                        qHeads: 16, kvHeads: 8, headDim: 64,
+                                        seqLen: 5, scale: 0.125)
+        #expect(out.allSatisfy { $0.isFinite })
+    }
 }

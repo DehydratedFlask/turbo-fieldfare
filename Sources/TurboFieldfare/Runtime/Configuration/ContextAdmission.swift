@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// The one host-memory admission rule for a requested context length.
 ///
@@ -13,18 +14,27 @@ public enum ContextAdmission {
     /// the expert-cache slots, prefill scratch, the tokenizer and the Metal
     /// library. Measured at 1.75-1.94 GB across PR 156's five rungs and the
     /// M2-8 8K row at 16 cache slots; extra slots are accounted for separately.
+    /// Gemma 4's profile carries this same value; the arithmetic below reads
+    /// `config.admission.nonKVRuntimeFootprintBytes` so a family can override
+    /// it. This constant stays the Gemma 4 baseline and the public name.
     public static let nonKVRuntimeFootprintBytes: UInt64 = 2 << 30
 
-    // The pinned IT pack uses 3,358,720 bytes per routed expert. Each layer
-    // owns its slots; the streamer rounds each allocation to the host page size.
-    private static let expertStrideBytes = 3_358_720
-
-    private static func additionalExpertCacheBytes(config: ArchConfig, slots: Int) -> UInt64 {
-        let page = Int(getpagesize())
-        let slotBytes = ((expertStrideBytes + page - 1) / page) * page
+    /// Bytes charged for expert-cache slots beyond the family's included
+    /// baseline.
+    ///
+    /// Gemma 4 includes 16 slots in the measured 2 GiB allowance; LFM2.5
+    /// includes none and charges from slot 0. Each routed layer owns its slots
+    /// and the streamer rounds each allocation up to the host page size.
+    /// Internal rather than public so its arithmetic can be pinned; the public
+    /// surface is `projectedFootprintBytes`/`minimumHostMemoryBytes`.
+    static func additionalExpertCacheBytes(config: ArchConfig, slots: Int) -> UInt64 {
+        let page = UInt64(getpagesize())
+        let stride = config.admission.expertStrideBytes
+        let slotBytes = ((stride + page - 1) / page) * page
         // Do not discount the measured baseline for smaller caches: the rest
         // of that allowance has not been measured separately.
-        return UInt64(max(0, slots - 16)) * UInt64(config.numLayers) * UInt64(slotBytes)
+        return UInt64(max(0, slots - config.admission.includedExpertCacheSlots))
+            * UInt64(config.admission.expertCacheLayers) * slotBytes
     }
 
     /// Headroom left to the OS and to a minimum routed-expert page cache. A
@@ -43,8 +53,9 @@ public enum ContextAdmission {
     /// image-token count, and `KVCacheManager` sizes the ring at
     /// `slidingWindow + maxPrefillChunkTokens`, so the widest chunk the runtime
     /// may see — not the default text chunk — is what the ring costs. 1,304
-    /// today.
+    /// today. A family with no sliding window (LFM2.5) has no ring at all.
     public static func productionSlidingRingRows(config: ArchConfig, maxContext: Int) -> Int {
+        guard config.slidingWindow > 0 else { return 0 }
         let chunkRows = max(PrefillRuntimeConfig.defaultChunked.chunkTokens,
                             VisionConfig().maximumPooledTokens)
         return min(maxContext, config.slidingWindow + chunkRows)
@@ -52,23 +63,40 @@ public enum ContextAdmission {
 
     /// FP16 K and V bytes the runtime allocates for `maxContext`.
     ///
-    /// Sliding-window layers are ring-capped; only the full-attention layers
-    /// grow with the context, at 20,480 B per token across the five of them.
+    /// Summed per layer from `layerTypes`: conv layers contribute nothing,
+    /// sliding-window layers are ring-capped, and only the full-attention
+    /// layers grow with the context — at 20,480 B per token across Gemma 4's
+    /// five of them and across LFM2.5's ten.
     public static func fp16KVBytes(config: ArchConfig, maxContext: Int) -> UInt64 {
-        let fullLayers = config.fullAttentionLayerMask.reduce(0) { $0 + ($1 == 0 ? 0 : 1) }
-        let slidingLayers = config.numLayers - fullLayers
         let fp16Bytes = 2
         let keyAndValue = 2
         let slidingRows = productionSlidingRingRows(config: config, maxContext: maxContext)
         let slidingBytesPerRow = config.numKVHeads * config.headDim * keyAndValue * fp16Bytes
         let fullBytesPerRow = config.numFullKVHeads * config.fullHeadDim * keyAndValue * fp16Bytes
-        return UInt64(slidingLayers * slidingRows * slidingBytesPerRow)
-            + UInt64(fullLayers * maxContext * fullBytesPerRow)
+        var total: UInt64 = 0
+        for layer in 0..<config.numLayers {
+            // Mirrors `KVCacheManager`'s layer-kind resolution exactly, so the
+            // admission figure can never describe a different set of layers
+            // than the one the runtime allocates for.
+            let type: LayerType = layer < config.layerTypes.count
+                ? config.layerTypes[layer]
+                : (config.fullAttentionLayerMask[layer] != 0 ? .fullAttention : .slidingAttention)
+            switch type {
+            case .conv:
+                continue
+            case .slidingAttention:
+                total += UInt64(slidingRows * slidingBytesPerRow)
+            case .fullAttention:
+                total += UInt64(maxContext * fullBytesPerRow)
+            }
+        }
+        return total
     }
 
     /// What the process is expected to occupy at this context.
     public static func projectedFootprintBytes(config: ArchConfig, maxContext: Int, expertCacheSlots: Int = 16) -> UInt64 {
-        fp16KVBytes(config: config, maxContext: maxContext) + nonKVRuntimeFootprintBytes
+        fp16KVBytes(config: config, maxContext: maxContext)
+            + config.admission.nonKVRuntimeFootprintBytes
             + additionalExpertCacheBytes(config: config, slots: expertCacheSlots)
     }
 

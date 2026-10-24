@@ -139,4 +139,70 @@ import Foundation
     @Test func contextCeilingComesFromTheCheckpoint() {
         #expect(config.maxPositionEmbeddings == 262_144)
     }
+
+    // MARK: - LFM2.5 profile
+
+    private let lfm = ArchConfig.lfm2_5_24B_A2B
+
+    @Test func lfmAdmissionMatchesDesignTable() {
+        let config = ArchConfig.lfm2_5_24B_A2B
+        #expect(ContextAdmission.fp16KVBytes(config: config, maxContext: 8_192) == 167_772_160)
+        #expect(ContextAdmission.fp16KVBytes(config: config, maxContext: 131_072) == 2_684_354_560)
+        let projected = ContextAdmission.projectedFootprintBytes(
+            config: config, maxContext: 8_192, expertCacheSlots: 8)
+        // 167,772,160 KV + 2,147,483,648 non-KV baseline
+        // + 8 slots × 38 layers × 5,308,416 = 3,929,014,272.
+        #expect(projected == 3_929_014_272)
+    }
+
+    /// Thirty of LFM's forty layers are convolutions. Only the ten full
+    /// attention layers carry K/V, so the whole context slope is 20,480 B per
+    /// token — 8 KV heads × 64 head dim × 2 bytes × K and V × 10 layers.
+    @Test func lfmConvLayersContributeNoKV() {
+        let small = ContextAdmission.fp16KVBytes(config: lfm, maxContext: 8_192)
+        let large = ContextAdmission.fp16KVBytes(config: lfm, maxContext: 16_384)
+        #expect(large - small == UInt64((16_384 - 8_192) * 20_480))
+        #expect(ContextAdmission.fp16KVBytes(config: lfm, maxContext: 8_192)
+                == UInt64(10 * 8_192 * 8 * 64 * 2 * 2))
+    }
+
+    /// No sliding window means no ring at all. Before this, the arithmetic
+    /// charged 30 conv layers a 1,304-row ring they never allocate.
+    @Test func lfmHasNoSlidingRingRows() {
+        #expect(ContextAdmission.productionSlidingRingRows(config: lfm, maxContext: 8_192) == 0)
+        #expect(ContextAdmission.productionSlidingRingRows(config: lfm, maxContext: 131_072) == 0)
+    }
+
+    /// LFM includes no expert-cache slots in its baseline, so every slot is
+    /// charged: slots × 38 routed layers × 5,308,416 bytes.
+    @Test func lfmExpertCacheIsChargedFromSlotZero() {
+        let config = ArchConfig.lfm2_5_24B_A2B
+        #expect(ContextAdmission.additionalExpertCacheBytes(config: config, slots: 0) == 0)
+        #expect(ContextAdmission.additionalExpertCacheBytes(config: config, slots: 8)
+                == 8 * 38 * 5_308_416)
+        #expect(ContextAdmission.additionalExpertCacheBytes(config: config, slots: 16)
+                == 16 * 38 * 5_308_416)
+    }
+
+    @Test func lfmProjectedFootprintUsesTheProfileBaseline() {
+        let kv = ContextAdmission.fp16KVBytes(config: lfm, maxContext: 131_072)
+        let experts = ContextAdmission.additionalExpertCacheBytes(config: lfm, slots: 16)
+        #expect(ContextAdmission.projectedFootprintBytes(config: lfm, maxContext: 131_072,
+                                                         expertCacheSlots: 16)
+                == kv + lfm.admission.nonKVRuntimeFootprintBytes + experts)
+    }
+
+    /// Gemma's admission arithmetic is the measured baseline: the same 8K KV
+    /// bytes, the same 2 GiB non-KV allowance, and no charge for the 16 slots
+    /// its baseline already includes.
+    @Test func gemmaAdmissionBytesAreUnchanged() {
+        let config = ArchConfig.gemma4_26B_A4B
+        #expect(ContextAdmission.fp16KVBytes(config: config, maxContext: 8_192)
+                == 434_831_360)
+        #expect(ContextAdmission.additionalExpertCacheBytes(config: config, slots: 16) == 0)
+        #expect(ContextAdmission.additionalExpertCacheBytes(config: config, slots: 0) == 0)
+        #expect(config.admission == .gemma4)
+        #expect(config.admission.nonKVRuntimeFootprintBytes
+                == ContextAdmission.nonKVRuntimeFootprintBytes)
+    }
 }

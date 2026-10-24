@@ -45,10 +45,15 @@ final class Attention {
     /// (q_smem[512] + reduce[8] + bcast) sizes are correct.
     static let threadsPerGroup: Int = 256
 
-    /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
-    /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
-    /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
+    /// Default split-KV scratch ceiling. `kAttnMaxHeadDim` in
+    /// attention.metal is 512; Gemma 4 has 16 Q heads and constructs the
+    /// default; LFM2.5 has 32 and passes it to `init`. `maxChunks` bounds the
+    /// split factor (and therefore the scratch size: heads·64·512 FP32).
+    static let defaultMaxQHeads = 16
+    /// This instance's Q-head ceiling for the split-KV scratch. Preconditions
+    /// in `encodeSplit` compare against it, so a dispatch wider than the
+    /// allocation fails instead of writing past the partial buffers.
+    let maxQHeads: Int
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.
@@ -62,8 +67,10 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, maxQHeads: Int = defaultMaxQHeads) throws {
+        precondition(maxQHeads > 0, "maxQHeads must be positive")
         self.ctx = context
+        self.maxQHeads = maxQHeads
         self.psoGroupedVecFull = try Self.specializedPipeline(
             context, "attention_decode_full_grouped_vec_partial",
             headDim: 512, numQHeads: 16, numKVHeads: 2)
@@ -119,7 +126,7 @@ final class Attention {
                                                                    numQHeads: 16,
                                                                    numKVHeads: 2,
                                                                    numChunks: 16)
-        let md = Self.maxQHeads * Self.maxChunks
+        let md = maxQHeads * Self.maxChunks
         guard let m = context.device.makeBuffer(length: md * MemoryLayout<Float>.size,
                                                 options: .storageModeShared),
 	              let d = context.device.makeBuffer(length: md * MemoryLayout<Float>.size,
@@ -245,8 +252,8 @@ final class Attention {
                              preferGQASWA: Bool,
                              forceGroupedVector: Bool = false,
                              ringCapacity: UInt32 = 0) {
-        precondition(Int(numQHeads) <= Self.maxQHeads,
-                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
+        precondition(Int(numQHeads) <= maxQHeads,
+                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
