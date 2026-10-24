@@ -287,6 +287,7 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
     case contextExceedsModel(requested: Int, maximum: Int)
     case kvAllocationFailed(layer: Int, bytes: Int)
     case routedExpertsUnavailable(layer: Int)
+    case unsupportedFamily(String)
 
     public var description: String {
         switch self {
@@ -324,6 +325,8 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
             return "KV cache allocation of \(bytes) bytes for layer \(layer) failed"
         case .routedExpertsUnavailable(let layer):
             return "layer \(layer) has no routed experts"
+        case .unsupportedFamily(let family):
+            return "model family \"\(family)\" has no runtime baseline in this build"
         }
     }
 }
