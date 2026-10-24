@@ -46,11 +46,40 @@ struct PackedExpertsLayout: Sendable {
     let expertStride: UInt64
     let numLayers: Int
     let expertsPerLayer: Int
+    /// MoE layers only, sorted by layer index. Dense layers have no entry.
     let layers: [LayerLayout]
+    /// `1` where the model layer has routed experts, `0` for a dense layer.
+    let moeLayerMask: [UInt8]
+    private let layerIndex: [Int: Int]
+
+    init(expertStride: UInt64,
+         numLayers: Int,
+         expertsPerLayer: Int,
+         layers: [LayerLayout],
+         moeLayerMask: [UInt8]? = nil) {
+        self.expertStride = expertStride
+        self.numLayers = numLayers
+        self.expertsPerLayer = expertsPerLayer
+        self.layers = layers
+        self.moeLayerMask = moeLayerMask
+            ?? [UInt8](repeating: 1, count: numLayers)
+        self.layerIndex = layers.enumerated().reduce(into: [:]) { index, pair in
+            index[pair.element.layer] = pair.offset
+        }
+    }
+
+    /// The MoE layer's layout. Dense and out-of-range layers throw.
+    func layerLayout(for layer: Int) throws -> LayerLayout {
+        guard moeLayerMask.indices.contains(layer), moeLayerMask[layer] == 1,
+              let index = layerIndex[layer] else {
+            throw ModelError.routedExpertsUnavailable(layer: layer)
+        }
+        return layers[index]
+    }
 
     /// Resolve `(layer, expert)` -> `ExpertEntry`. O(1).
-    func expert(layer: Int, expert: Int) -> ExpertEntry {
-        return layers[layer].experts[expert]
+    func expert(layer: Int, expert: Int) throws -> ExpertEntry {
+        try layerLayout(for: layer).experts[expert]
     }
 }
 
@@ -80,15 +109,17 @@ enum PackedExpertsLayoutReader {
     package static func decode(data: Data,
                                manifest: Manifest?) throws -> PackedExpertsLayout {
         let wire: GTurboPackedExpertsLayoutV1
+        let mask = manifest?.arch.moeLayerMask
         do {
-            wire = try GTurboPackedExpertsLayoutCodec.decode(data)
+            wire = try GTurboPackedExpertsLayoutCodec.decode(data, moeLayerMask: mask)
             if let manifest {
                 try GTurboV1StructuralValidator.crossValidate(
                     manifestNumLayers: manifest.numLayers,
                     manifestExpertsPerLayer: manifest.expertsPerLayer,
                     manifestExpertStride: manifest.expertStride,
                     manifestFileSizes: manifest.files.mapValues(\.size),
-                    layout: wire)
+                    layout: wire,
+                    moeLayerMask: mask)
             }
         } catch {
             throw ModelError.indexCorrupt(detail: "layout.json: \(error)")
@@ -112,7 +143,9 @@ enum PackedExpertsLayoutReader {
         return PackedExpertsLayout(expertStride: wire.expertStride,
                                    numLayers: wire.numLayers,
                                    expertsPerLayer: wire.expertsPerLayer,
-                                   layers: layers)
+                                   layers: layers,
+                                   moeLayerMask: (mask ?? Array(
+                                       repeating: 1, count: wire.numLayers)).map { UInt8($0) })
     }
 
 }

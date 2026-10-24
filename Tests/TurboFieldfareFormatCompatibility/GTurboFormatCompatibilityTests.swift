@@ -37,7 +37,7 @@ import Testing
             expecting: fixture.config)
         let layout = try PackedExpertsLayoutReader.decode(
             data: frozenLayout, manifest: manifest)
-        #expect(layout.expert(layer: 0, expert: 1).offset == fixture.expertStride)
+        #expect(try layout.expert(layer: 0, expert: 1).offset == fixture.expertStride)
         let manifestRoot = try #require(
             JSONSerialization.jsonObject(with: frozenManifest) as? [String: Any])
         #expect(manifestRoot["bitWidthOverridesHonored"] as? Int == 120)

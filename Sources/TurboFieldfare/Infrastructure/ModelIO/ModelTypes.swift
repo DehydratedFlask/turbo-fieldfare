@@ -286,6 +286,7 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
     case trustedReceiptInvalid(detail: String)
     case contextExceedsModel(requested: Int, maximum: Int)
     case kvAllocationFailed(layer: Int, bytes: Int)
+    case routedExpertsUnavailable(layer: Int)
 
     public var description: String {
         switch self {
@@ -321,6 +322,8 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
             return "maxContext \(requested) exceeds the model's maximum position \(maximum)"
         case .kvAllocationFailed(let layer, let bytes):
             return "KV cache allocation of \(bytes) bytes for layer \(layer) failed"
+        case .routedExpertsUnavailable(let layer):
+            return "layer \(layer) has no routed experts"
         }
     }
 }

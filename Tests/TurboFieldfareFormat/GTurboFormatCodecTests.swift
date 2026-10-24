@@ -703,6 +703,22 @@ private extension GTurboManifestArchV1 {
             manifest: FormatFixture.manifest(), layout: FormatFixture.layout())
     }
 
+    @Test func layoutMustContainExactlyTheMoELayers() throws {
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboV1StructuralValidator.validate(
+                makeLFMLayout(moeLayers: [2], numLayers: 4),
+                numLayers: 4, moeLayerMask: [0, 0, 1, 1])
+        }
+    }
+
+    @Test func gemmaLayoutStillRequiresOneEntryPerLayer() throws {
+        #expect(throws: Never.self) {
+            try GTurboV1StructuralValidator.validate(
+                makeGemmaLayout(numLayers: 30),
+                numLayers: 30, moeLayerMask: Array(repeating: 1, count: 30))
+        }
+    }
+
     @Test func rejectsTensorOutsideExpertBlob() throws {
         let base = FormatFixture.layout()
         let invalid = GTurboSubTensorV1(
@@ -781,4 +797,34 @@ private extension GTurboManifestArchV1 {
             try GTurboV1StructuralValidator.validate(layout)
         }
     }
+}
+
+private func makeLayer(_ layer: Int) -> GTurboLayerV1 {
+    let tensor = GTurboSubTensorV1(
+        offset: 0, size: 32, dtype: "U32", shape: [8, 8], bits: 4)
+    let expert = GTurboExpertV1(
+        expert: 0, physicalRank: 0, offset: 0,
+        size: GTurboFormatV1.alignmentBytes,
+        tensors: ["gate": tensor])
+    return GTurboLayerV1(
+        layer: layer,
+        file: String(format: "layer_%02d.bin", layer),
+        experts: [expert])
+}
+
+private func makeGemmaLayout(numLayers: Int) -> GTurboPackedExpertsLayoutV1 {
+    GTurboPackedExpertsLayoutV1(
+        expertStride: GTurboFormatV1.alignmentBytes,
+        numLayers: numLayers,
+        expertsPerLayer: 1,
+        layers: (0..<numLayers).map(makeLayer))
+}
+
+private func makeLFMLayout(moeLayers: [Int], numLayers: Int)
+    -> GTurboPackedExpertsLayoutV1 {
+    GTurboPackedExpertsLayoutV1(
+        expertStride: GTurboFormatV1.alignmentBytes,
+        numLayers: numLayers,
+        expertsPerLayer: 1,
+        layers: moeLayers.map(makeLayer))
 }

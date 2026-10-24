@@ -1115,7 +1115,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         topK: cfg.topKExperts,
                         numExperts: cfg.numExperts,
                         tileExpertCount: routeTileExpertCount,
-                        expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+                        expertSortKeys: try model.routedExpertPhysicalOffsets(layer: L))
 
                     guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
@@ -1151,7 +1151,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                         device: ctx.device,
                         routes: routes)
-                    let routedOffsets = model.routedExpertOffsets(layer: L)
+                    let routedOffsets = try model.routedExpertOffsets(layer: L)
                     struct PendingPrefillTile {
                         let tileIndex: Int
                         let commandBuffer: MTLCommandBuffer
@@ -1632,7 +1632,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
 
-            let routedOffsets = model.routedExpertOffsets(layer: L)
+            let routedOffsets = try model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)
             let canPlanPhase1HitSplit =
                 cfg.topKExperts <= MoE.maxStreamedExperts

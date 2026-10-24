@@ -18,8 +18,8 @@ public struct RoutedExpertFetchPlan: Sendable {
 }
 
 extension Model {
-    public func routedExpertOffsets(layer: Int) -> MoEExpertOffsets {
-        let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
+    public func routedExpertOffsets(layer: Int) throws -> MoEExpertOffsets {
+        let expert = try packedExpertsLayout.expert(layer: layer, expert: 0)
         func offset(_ role: String) -> UInt32 {
             guard let tensor = expert.subTensors[role],
                   let offset = UInt32(exactly: tensor.offset) else {
@@ -39,8 +39,8 @@ extension Model {
             downBOff: offset("down_biases"))
     }
 
-    public func routedExpertPhysicalOffsets(layer: Int) -> [UInt64] {
-        packedExpertsLayout.layers[layer].experts.map(\.offset)
+    public func routedExpertPhysicalOffsets(layer: Int) throws -> [UInt64] {
+        try packedExpertsLayout.layerLayout(for: layer).experts.map(\.offset)
     }
 
     public func adviseRoutedExperts(layer: Int,

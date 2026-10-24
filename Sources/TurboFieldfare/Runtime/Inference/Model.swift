@@ -271,7 +271,8 @@ public struct Model {
         if streamersBox.streamers[L] != nil {
             return
         }
-        let basename = packedExpertsLayout.layers[L].file
+        let layerLayout = try packedExpertsLayout.layerLayout(for: L)
+        let basename = layerLayout.file
         let url = directoryURL
             .appendingPathComponent("packed_experts")
             .appendingPathComponent(basename)
@@ -305,7 +306,7 @@ public struct Model {
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
             expertStride: packedExpertsLayout.expertStride,
-            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
+            expertOffsets: layerLayout.experts.map(\.offset))
         let slotCount: Int
         switch streamingMode {
         case .pread(let configuredSlotCount):

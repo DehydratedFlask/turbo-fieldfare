@@ -62,16 +62,26 @@ package struct GTurboPackedExpertsLayoutV1: Codable, Equatable, Sendable {
 }
 
 package enum GTurboPackedExpertsLayoutCodec {
-    package static func decode(_ data: Data) throws -> GTurboPackedExpertsLayoutV1 {
+    package static func decode(_ data: Data,
+                               moeLayerMask: [Int]? = nil) throws -> GTurboPackedExpertsLayoutV1 {
         let layout: GTurboPackedExpertsLayoutV1
         do { layout = try JSONDecoder().decode(GTurboPackedExpertsLayoutV1.self, from: data) }
         catch { throw GTurboFormatError.invalid(field: "packed_experts/layout.json", reason: "\(error)") }
-        try GTurboV1StructuralValidator.validate(layout)
+        try GTurboV1StructuralValidator.validate(
+            layout,
+            numLayers: layout.numLayers,
+            moeLayerMask: moeLayerMask
+                ?? Array(repeating: 1, count: layout.numLayers))
         return layout
     }
 
-    package static func encode(_ layout: GTurboPackedExpertsLayoutV1) throws -> Data {
-        try GTurboV1StructuralValidator.validate(layout)
+    package static func encode(_ layout: GTurboPackedExpertsLayoutV1,
+                               moeLayerMask: [Int]? = nil) throws -> Data {
+        try GTurboV1StructuralValidator.validate(
+            layout,
+            numLayers: layout.numLayers,
+            moeLayerMask: moeLayerMask
+                ?? Array(repeating: 1, count: layout.numLayers))
         let encoder = JSONEncoder()
         do {
             let object = try JSONSerialization.jsonObject(with: encoder.encode(layout))
@@ -87,16 +97,30 @@ package enum GTurboPackedExpertsLayoutCodec {
 
 package enum GTurboV1StructuralValidator {
     package static func validate(_ layout: GTurboPackedExpertsLayoutV1) throws {
+        try validate(layout,
+                     numLayers: layout.numLayers,
+                     moeLayerMask: Array(repeating: 1, count: layout.numLayers))
+    }
+
+    /// Validates a MoE-only layout against the checkpoint's layer mask: one
+    /// unique entry for every MoE layer and none for a dense layer.
+    package static func validate(_ layout: GTurboPackedExpertsLayoutV1,
+                                 numLayers: Int,
+                                 moeLayerMask: [Int]) throws {
         guard layout.numLayers > 0, layout.expertsPerLayer > 0,
               layout.expertStride > 0,
               layout.expertStride % GTurboFormatV1.alignmentBytes == 0,
-              layout.layers.count == layout.numLayers else {
+              numLayers == layout.numLayers,
+              moeLayerMask.count == numLayers,
+              moeLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }),
+              layout.layers.count == moeLayerMask.filter({ $0 == 1 }).count else {
             throw GTurboFormatError.invalid(field: "layout", reason: "invalid dimensions or stride")
         }
         var layerIDs = Set<Int>()
         var layerFiles = Set<String>()
         for layer in layout.layers {
-            guard layer.layer >= 0, layer.layer < layout.numLayers,
+            guard layer.layer >= 0, layer.layer < numLayers,
+                  moeLayerMask[layer.layer] == 1,
                   layerIDs.insert(layer.layer).inserted else {
                 throw GTurboFormatError.invalid(field: "layout.layers", reason: "duplicate or invalid layer")
             }
@@ -182,7 +206,8 @@ package enum GTurboV1StructuralValidator {
             manifestExpertsPerLayer: manifest.expertsPerLayer,
             manifestExpertStride: manifest.expertStride,
             manifestFileSizes: manifest.files.mapValues(\.size),
-            layout: layout)
+            layout: layout,
+            moeLayerMask: manifest.arch.moeLayerMask)
     }
 
     package static func crossValidate(
@@ -190,7 +215,8 @@ package enum GTurboV1StructuralValidator {
         manifestExpertsPerLayer: Int,
         manifestExpertStride: UInt64,
         manifestFileSizes: [String: UInt64],
-        layout: GTurboPackedExpertsLayoutV1
+        layout: GTurboPackedExpertsLayoutV1,
+        moeLayerMask: [Int]? = nil
     ) throws {
         guard manifestNumLayers == layout.numLayers,
               manifestExpertsPerLayer == layout.expertsPerLayer,
@@ -198,6 +224,9 @@ package enum GTurboV1StructuralValidator {
             throw GTurboFormatError.invalid(field: "manifest/layout",
                                             reason: "dimension mismatch")
         }
+        let mask = moeLayerMask
+            ?? Array(repeating: 1, count: manifestNumLayers)
+        try validate(layout, numLayers: manifestNumLayers, moeLayerMask: mask)
         let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                           layout.expertStride,
                                                           field: "layout.layerSize")
