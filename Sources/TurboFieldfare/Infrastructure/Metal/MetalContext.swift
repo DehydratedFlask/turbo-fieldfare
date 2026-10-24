@@ -141,6 +141,7 @@ public final class MetalContext: @unchecked Sendable {
         "utility",
         "fused",
         "prefill",
+        "shortconv",
         "vision",
     ]
 
@@ -156,6 +157,7 @@ public final class MetalContext: @unchecked Sendable {
         "prefill": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
+        "shortconv": "Metal/Convolution",
         "tensorops": "Metal/TensorCore",
         "utility": "Metal/Primitives",
         "vision": "Metal/Vision",
