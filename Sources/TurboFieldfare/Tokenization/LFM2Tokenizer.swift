@@ -251,20 +251,42 @@ public struct LFM2Tokenizer: ModelTokenizer, LFM2ByteLevelVocabulary, @unchecked
                                  tools: [ToolDefinition]?) throws -> ContinuationPlan {
         let full = try applyChatTemplate(
             messages: incomingMessages, tools: tools, addGenerationPrompt: true)
-        guard incomingMessages.count >= cachedMessages.count,
-              Array(incomingMessages.prefix(cachedMessages.count)) == cachedMessages,
-              full.count > cachedTokenIDs.count,
-              Array(full.prefix(cachedTokenIDs.count)) == cachedTokenIDs else {
-            return .replayAll(full)
-        }
-        let suffix = Array(full.dropFirst(cachedTokenIDs.count))
-        guard suffix.first == 124_900 || suffix.first == 124_899 else {
-            return .replayAll(full)
-        }
-        return .reuse(prefixTokens: cachedTokenIDs, suffixTokens: suffix)
+        return LFM2ContinuationPlanner.plan(
+            cachedMessages: cachedMessages,
+            cachedTokenIDs: cachedTokenIDs,
+            incomingMessages: incomingMessages,
+            fullTokens: full)
     }
 
     public func makeAssistantDecoder(allowedTools: Set<String>) -> (any StructuredOutputDecoder)? {
         LFM2AssistantDecoder(allowedTools: allowedTools)
+    }
+}
+
+/// The family-neutral token-prefix comparison behind `continuationPlan`.
+///
+/// Kept separate from the tokenizer so the reuse/replay rules can be tested
+/// without a 17 MB tokenizer fixture. `fullTokens` is the complete render of
+/// `incomingMessages` with the generation prompt; reuse is only safe when the
+/// KV's token prefix is still that exact prefix and the next rendered token
+/// starts the new turn.
+enum LFM2ContinuationPlanner {
+    static func plan(cachedMessages: [ChatMessage],
+                     cachedTokenIDs: [Int32],
+                     incomingMessages: [ChatMessage],
+                     fullTokens: [Int32]) -> ContinuationPlan {
+        guard incomingMessages.count >= cachedMessages.count,
+              Array(incomingMessages.prefix(cachedMessages.count)) == cachedMessages,
+              fullTokens.count > cachedTokenIDs.count,
+              Array(fullTokens.prefix(cachedTokenIDs.count)) == cachedTokenIDs else {
+            return .replayAll(fullTokens)
+        }
+        let suffix = Array(fullTokens.dropFirst(cachedTokenIDs.count))
+        // 124900 is the normal case: the KV excludes the stop token, so the
+        // next full-render token is the assistant turn's `<|im_end|>`.
+        guard suffix.first == 124_900 || suffix.first == 124_899 else {
+            return .replayAll(fullTokens)
+        }
+        return .reuse(prefixTokens: cachedTokenIDs, suffixTokens: suffix)
     }
 }

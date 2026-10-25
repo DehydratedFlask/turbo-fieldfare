@@ -44,7 +44,7 @@ private func makeLFMTokenizerDirectory(includeIdentity: Bool) throws -> URL {
     return directory
 }
 
-private enum InstalledTokenizerPacks {
+enum InstalledTokenizerPacks {
     static var gemmaDirectory: URL? { modelDirectory(named: "gemma4.gturbo") }
     static var lfmDirectory: URL? { modelDirectory(named: "lfm2.5-24b-a2b.gturbo") }
 
