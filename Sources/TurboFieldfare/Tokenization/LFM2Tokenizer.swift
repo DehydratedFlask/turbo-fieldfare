@@ -245,6 +245,11 @@ public struct LFM2Tokenizer: ModelTokenizer, LFM2ByteLevelVocabulary, @unchecked
         return encode(text, addBOS: false)
     }
 
+    public func encodeTextContinuation(userContent: String) -> [Int32] {
+        encode(LFM2ChatRenderer().continuationPrompt(userContent: userContent),
+               addBOS: false)
+    }
+
     public func continuationPlan(cachedMessages: [ChatMessage],
                                  cachedTokenIDs: [Int32],
                                  incomingMessages: [ChatMessage],

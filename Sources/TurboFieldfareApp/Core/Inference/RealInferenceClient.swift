@@ -174,6 +174,14 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
 
     public func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
         AsyncThrowingStream { continuation in
+            if !request.imageAttachments.isEmpty,
+               let family = try? ManifestReader.peekFamily(
+                directoryURL: request.modelDirectory),
+               family != .gemma4 {
+                continuation.yield(.failed(.imagesUnsupported(family), partial: nil))
+                continuation.finish(throwing: AppInferenceError.imagesUnsupported(family))
+                return
+            }
             let generationID = UUID()
             guard generationTasks.reserve(generationID) else {
                 continuation.yield(.failed(.generationInFlight, partial: nil))
@@ -256,14 +264,15 @@ struct TokenizerDirectoryCache: Equatable, Sendable {
 actor RealInferenceSession {
     private var loadedKey: SessionLoadKey?
     private var ctx: MetalContext?
-    private var tokenizer: GFTokenizer?
+    private var tokenizer: (any ModelTokenizer)?
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
-    private var runner: RealForwardRunner?
+    private var runner: (any TextRunner)?
     private var scratch: RawCompletionScratch?
     private var model: Model?
     /// The open conversation, when the app is in chat mode. Nil for the
     /// one-shot path, and dropped by any load, unload, or explicit reset.
     private var conversation: MultimodalConversation?
+    private var lfmConversation: LFM2Conversation?
     /// Bytes of image tower held mapped right now, published outside the actor
     /// so a reader does not have to await it mid-decode.
     nonisolated let towerBytes = Mutex<UInt64?>(nil)
@@ -307,7 +316,9 @@ actor RealInferenceSession {
         // Same hazard as `unload()`: `runner.reset()` under a live decode either
         // aborts that turn mid-stream or lets two turns drive one runner.
         if let conversation { await conversation.invalidate() }
+        if let lfmConversation { await lfmConversation.invalidate() }
         conversation = nil
+        lfmConversation = nil
         runner?.reset()
         conversationTokens.withLock { $0 = 0 }
     }
@@ -339,6 +350,26 @@ actor RealInferenceSession {
             prefillConfig = coerced
         }
         await resetConversation()
+        if let model, model.config.family == .lfm2Moe {
+            do {
+                let conversation = try lfmConversationForRestore()
+                self.lfmConversation = conversation
+                try await conversation.restore(
+                    lineage: lineage,
+                    prefillConfig: prefillConfig,
+                    checkCancellation: { try Task.checkCancellation() },
+                    onProgress: onProgress)
+                publishTowerBytes()
+                let count = await conversation.kvTokenCount
+                conversationTokens.withLock { $0 = count }
+                return count
+            } catch {
+                lfmConversation = nil
+                runner?.reset()
+                conversationTokens.withLock { $0 = 0 }
+                throw AppInferenceError.conversationRestoreFailed("\(error)")
+            }
+        }
         let conversation = try conversationForRestore(options: options)
         do {
             try await conversation.restore(
@@ -367,27 +398,51 @@ actor RealInferenceSession {
         guard let model, let ctx, let tokenizer, let runner, let scratch else {
             throw AppInferenceError.modelLoadFailed("session lost its loaded state")
         }
-        runner.reset()
+        guard let gemmaTokenizer = tokenizer as? GFTokenizer,
+              let realRunner = runner as? RealForwardRunner else {
+            throw AppInferenceError.modelLoadFailed(
+                "the loaded tokenizer and runner are not the Gemma pair")
+        }
+        realRunner.reset()
         // The same waiver `conversationForTurn` takes, for the same reason: one
         // conversation and one generation at a time is this session's
         // invariant, not the type system's.
         nonisolated(unsafe) let sharedModel = model
         nonisolated(unsafe) let sharedVision = visionRuntime
         let created = MultimodalConversation(
-            model: sharedModel, context: ctx, tokenizer: tokenizer, runner: runner,
+            model: sharedModel, context: ctx, tokenizer: gemmaTokenizer,
+            runner: realRunner,
             scratch: scratch, visionRuntime: sharedVision,
             visionRuntimeError: visionRuntimeError,
             visionResidency: options.visionResidencyPolicy,
-            maxContext: runner.maxContext)
+            maxContext: realRunner.maxContext)
         conversation = created
         return created
     }
 
-    var hasConversation: Bool { conversation != nil }
+    private func lfmConversationForRestore() throws -> LFM2Conversation {
+        guard let model, let ctx, let tokenizer, let runner, let scratch else {
+            throw AppInferenceError.modelLoadFailed("session lost its loaded state")
+        }
+        guard let lfmTokenizer = tokenizer as? LFM2Tokenizer,
+              let lfmRunner = runner as? LFM2ForwardRunner else {
+            throw AppInferenceError.modelLoadFailed(
+                "the loaded tokenizer and runner are not the LFM pair")
+        }
+        lfmRunner.reset()
+        nonisolated(unsafe) let sharedModel = model
+        return LFM2Conversation(
+            model: sharedModel, context: ctx, tokenizer: lfmTokenizer,
+            runner: lfmRunner, scratch: scratch, maxContext: lfmRunner.maxContext)
+    }
+
+    var hasConversation: Bool { conversation != nil || lfmConversation != nil }
 
     var currentConversationTokens: Int {
         get async {
-            let count = await conversation?.kvTokenCount ?? 0
+            let gemmaCount = await conversation?.kvTokenCount
+            let lfmCount = await lfmConversation?.kvTokenCount
+            let count = gemmaCount ?? lfmCount ?? 0
             conversationTokens.withLock { $0 = count }
             return count
         }
@@ -435,7 +490,7 @@ actor RealInferenceSession {
                 context = try MetalContext()
                 ctx = context
             }
-            let loadedModel = try Model.load(
+            let loadedModel = try Model.loadResolvingFamily(
                 directoryURL: key.directory,
                 device: context.device,
                 streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
@@ -444,7 +499,7 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.preparingRunner))
-            let loadedRunner = try RealForwardRunner(
+            let loadedRunner = try RunnerFactory.make(
                 model: loadedModel,
                 context: context,
                 maxContext: key.maxContext,
@@ -455,23 +510,29 @@ actor RealInferenceSession {
 
             let loadedVisionRuntime: VisionRuntime?
             let loadedVisionRuntimeError: Error?
-            do {
-                let runtime = try VisionRuntime.open(
-                    textModelURL: key.directory,
-                    context: context)
-                // Keep Ready maps the tower during the load rather than on the
-                // first image, so the wait is where the user asked for it.
-                if key.options.visionResidencyPolicy == .keepReady {
-                    onState(.loading(.mappingImageTower))
-                    try runtime.prewarmWeightRegions()
+            if loadedModel.config.family == .gemma4 {
+                do {
+                    let runtime = try VisionRuntime.open(
+                        textModelURL: key.directory,
+                        context: context)
+                    // Keep Ready maps the tower during the load rather than on the
+                    // first image, so the wait is where the user asked for it.
+                    if key.options.visionResidencyPolicy == .keepReady {
+                        onState(.loading(.mappingImageTower))
+                        try runtime.prewarmWeightRegions()
+                    }
+                    loadedVisionRuntime = runtime
+                    loadedVisionRuntimeError = nil
+                } catch {
+                    // A missing or invalid pack only means images are unavailable;
+                    // the reason travels to the first image turn.
+                    loadedVisionRuntime = nil
+                    loadedVisionRuntimeError = error
                 }
-                loadedVisionRuntime = runtime
-                loadedVisionRuntimeError = nil
-            } catch {
-                // A missing or invalid pack only means images are unavailable;
-                // the reason travels to the first image turn.
+            } else {
                 loadedVisionRuntime = nil
-                loadedVisionRuntimeError = error
+                loadedVisionRuntimeError = AppInferenceError.imagesUnsupported(
+                    loadedModel.config.family)
             }
             try Task.checkCancellation()
 
@@ -495,8 +556,10 @@ actor RealInferenceSession {
         }
     }
 
-    private static func loadTokenizer(for modelDirectory: URL) async throws -> GFTokenizer {
-        try await GFTokenizer.load(forModelDirectory: modelDirectory)
+    private static func loadTokenizer(for modelDirectory: URL) async throws -> any ModelTokenizer {
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        return try await TokenizerFactory.load(
+            family: family, forModelDirectory: modelDirectory)
     }
 
     static func forceLogitsHead(for request: AppGenerationRequest) -> Bool {
@@ -525,7 +588,9 @@ actor RealInferenceSession {
         // frees nothing and the next load builds a second set beside the live
         // one. `invalidate()` is what waits for that decode.
         if let conversation { await conversation.invalidate() }
+        if let lfmConversation { await lfmConversation.invalidate() }
         conversation = nil
+        lfmConversation = nil
         conversationTokens.withLock { $0 = 0 }
         visionRuntime = nil
         visionRuntimeError = nil
@@ -626,6 +691,96 @@ actor RealInferenceSession {
             computedPrefillTokens: result.computedPrefillTokens)
     }
 
+    /// One-shot LFM generation. The detokenizer preserves the non-special
+    /// think markers, so raw deltas are routed through the assistant decoder
+    /// and only visible content reaches the app.
+    private func runOneShotLFM(
+        request: AppGenerationRequest,
+        runner: LFM2ForwardRunner,
+        tokenizer: LFM2Tokenizer,
+        ctx: MetalContext,
+        scratch: RawCompletionScratch,
+        prefillConfig: PrefillRuntimeConfig,
+        progress: ProgressState,
+        memorySampler: AppMemorySampler,
+        report: @escaping @Sendable (RawDecodeProgress) -> Void
+    ) async throws -> TurnOutcome {
+        let promptIds = try tokenizer.applyChatTemplate(
+            messages: [ChatMessage(role: .user, content: request.prompt)],
+            tools: nil, addGenerationPrompt: true)
+        progress.promptTokenCount = promptIds.count
+        guard promptIds.count < runner.maxContext else {
+            throw AppInferenceError.contextOverflow(prompt: promptIds.count,
+                                                    maxNew: request.maxNewTokens,
+                                                    maxContext: runner.maxContext)
+        }
+        memorySampler.resetPeak()
+        _ = memorySampler.sample()
+        let config = Self.generationConfig(
+            for: request,
+            maxNewTokens: Self.effectiveMaxNewTokens(
+                requested: request.maxNewTokens,
+                promptTokenCount: promptIds.count,
+                maxContext: runner.maxContext))
+        runner.reset()
+        progress.prefillStart = Date()
+
+        let decoder = LFM2AssistantDecoder(allowedTools: [])
+        let decodeFailure = Mutex<(any Error)?>(nil)
+        let stopDecoding = Mutex(false)
+        let shouldStop: @Sendable () -> Bool = {
+            self.stopFlagReader()() || stopDecoding.withLock { $0 }
+        }
+        let result = try await runRawCompletion(
+            producer: runner, tokenizer: tokenizer, promptIds: promptIds,
+            config: config, context: ctx, scratch: scratch,
+            prefillConfig: prefillConfig,
+            shouldStop: shouldStop,
+            onProgress: { event in
+                switch event {
+                case .prefill(let done, let total):
+                    report(.prefill(done: done, total: total))
+                case .reasoning(let flag):
+                    report(.reasoning(flag))
+                case .token(let index, let id, let delta):
+                    do {
+                        for item in try decoder.consume(tokenID: id, delta: delta) {
+                            switch item {
+                            case .content(let text):
+                                report(.token(index: index, id: id, delta: text))
+                            case .reasoning(let flag):
+                                report(.reasoning(flag))
+                            case .toolCall:
+                                break
+                            }
+                        }
+                    } catch {
+                        decodeFailure.withLock { $0 = error }
+                        stopDecoding.withLock { $0 = true }
+                    }
+                case .tail(let text):
+                    do {
+                        for item in try decoder.consumeTail(text) {
+                            if case .content(let chunk) = item {
+                                report(.tail(chunk))
+                            } else if case .reasoning(let flag) = item {
+                                report(.reasoning(flag))
+                            }
+                        }
+                    } catch {
+                        decodeFailure.withLock { $0 = error }
+                        stopDecoding.withLock { $0 = true }
+                    }
+                }
+            })
+        if let failure = decodeFailure.withLock({ $0 }) { throw failure }
+        try decoder.finish()
+        return TurnOutcome(
+            reason: result.reason, prefillSeconds: result.prefillSeconds,
+            decodeSeconds: result.decodeSeconds, newTokens: result.newTokens,
+            computedPrefillTokens: result.computedPrefillTokens)
+    }
+
     /// What both turn paths report back, so the terminal diagnostics do not
     /// have to know which one ran.
     struct TurnOutcome {
@@ -657,10 +812,15 @@ actor RealInferenceSession {
         guard let model, let ctx, let tokenizer, let runner, let scratch else {
             throw AppInferenceError.modelLoadFailed("session lost its loaded state")
         }
+        guard let gemmaTokenizer = tokenizer as? GFTokenizer,
+              let realRunner = runner as? RealForwardRunner else {
+            throw AppInferenceError.modelLoadFailed(
+                "the loaded tokenizer and runner are not the Gemma pair")
+        }
         // A conversation starts from an empty KV. The runner may be carrying a
         // one-shot generation's tokens, and resuming a first turn onto those
         // would put a prompt the user never sent in front of this one.
-        runner.reset()
+        realRunner.reset()
         // The same waiver `TurboFieldfareModelSession` takes, and it holds for
         // the same reason: `Model` and `VisionRuntime` are not Sendable because
         // two conversations encoding at once would race the tower's per-encode
@@ -672,13 +832,84 @@ actor RealInferenceSession {
         nonisolated(unsafe) let sharedModel = model
         nonisolated(unsafe) let sharedVision = visionRuntime
         let created = MultimodalConversation(
-            model: sharedModel, context: ctx, tokenizer: tokenizer, runner: runner,
+            model: sharedModel, context: ctx, tokenizer: gemmaTokenizer,
+            runner: realRunner,
             scratch: scratch, visionRuntime: sharedVision,
             visionRuntimeError: visionRuntimeError,
             visionResidency: request.runtimeOptions.visionResidencyPolicy,
-            maxContext: runner.maxContext)
+            maxContext: realRunner.maxContext)
         conversation = created
         return created
+    }
+
+    private func lfmConversationForTurn(
+        _ request: AppGenerationRequest
+    ) throws -> LFM2Conversation {
+        if let lfmConversation { return lfmConversation }
+        guard let model, let ctx, let tokenizer, let runner, let scratch else {
+            throw AppInferenceError.modelLoadFailed("session lost its loaded state")
+        }
+        guard let lfmTokenizer = tokenizer as? LFM2Tokenizer,
+              let lfmRunner = runner as? LFM2ForwardRunner else {
+            throw AppInferenceError.modelLoadFailed(
+                "the loaded tokenizer and runner are not the LFM pair")
+        }
+        lfmRunner.reset()
+        nonisolated(unsafe) let sharedModel = model
+        let created = LFM2Conversation(
+            model: sharedModel, context: ctx, tokenizer: lfmTokenizer,
+            runner: lfmRunner, scratch: scratch, maxContext: lfmRunner.maxContext)
+        lfmConversation = created
+        return created
+    }
+
+    private func runLFMConversationTurn(
+        request: AppGenerationRequest,
+        prefillConfig: PrefillRuntimeConfig,
+        progress: ProgressState,
+        memorySampler: AppMemorySampler,
+        report: @escaping @Sendable (RawDecodeProgress) -> Void
+    ) async throws -> TurnOutcome {
+        let conversation = try lfmConversationForTurn(request)
+        var parts: [MultimodalContinuationPart] = []
+        if !request.prompt.isEmpty { parts.append(.text(request.prompt)) }
+        memorySampler.resetPeak()
+        _ = memorySampler.sample()
+        progress.prefillStart = Date()
+        do {
+            let turn = try await conversation.send(
+                parts: parts, images: [],
+                config: Self.generationConfig(
+                    for: request, maxNewTokens: request.maxNewTokens),
+                prefillConfig: prefillConfig,
+                checkCancellation: { try Task.checkCancellation() },
+                shouldStop: stopFlagReader(),
+                onProgress: report)
+            progress.promptTokenCount = turn.promptTokens
+            conversationTokens.withLock { $0 = turn.kvTokens }
+            return TurnOutcome(
+                reason: turn.reason, prefillSeconds: turn.prefillSeconds,
+                decodeSeconds: turn.decodeSeconds, newTokens: turn.completionTokens,
+                cachedTokens: turn.cachedTokens,
+                computedPrefillTokens: turn.computedPrefillTokens,
+                conversationTokens: turn.kvTokens,
+                promptTokenIDs: turn.promptTokenIDs,
+                generatedTokenIDs: turn.generatedTokenIDs,
+                boundaryTokenIDs: turn.uncommittedBoundaryTokenIDs,
+                boundaryNeedsReplay: turn.boundaryNeedsReplay)
+        } catch let error as LFM2ConversationError {
+            switch error {
+            case .lineageBroken:
+                throw AppInferenceError.conversationLineageLost("\(error)")
+            case .contextExhausted(let prompt, let reserve, let maxContext):
+                throw AppInferenceError.conversationContextExhausted(
+                    prompt: prompt, reserve: reserve, maxContext: maxContext)
+            case .imagesUnsupported:
+                throw AppInferenceError.imagesUnsupported(.lfm2Moe)
+            case .closed, .busy, .emptyTurn, .continuationMismatch:
+                throw AppInferenceError.invalidRequest("\(error)")
+            }
+        }
     }
 
     private func runConversationTurn(
@@ -688,6 +919,11 @@ actor RealInferenceSession {
         memorySampler: AppMemorySampler,
         report: @escaping @Sendable (RawDecodeProgress) -> Void
     ) async throws -> TurnOutcome {
+        if let model, model.config.family == .lfm2Moe {
+            return try await runLFMConversationTurn(
+                request: request, prefillConfig: prefillConfig,
+                progress: progress, memorySampler: memorySampler, report: report)
+        }
         let conversation = try conversationForTurn(request)
         var parts: [MultimodalContinuationPart] = []
         var imageURLs: [URL] = []
@@ -807,13 +1043,13 @@ actor RealInferenceSession {
                         // From here there are token boundaries to stop at.
                         self.decodeBegan.withLock { $0 = true }
                         progress.decodeStart = Date()
-                        progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
+                        if let realRunner = runner as? RealForwardRunner {
+                            progress.countersAtDecodeStart = RunnerCounterSnapshot(realRunner)
+                        }
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
-                case .reasoning:
-                    // Reasoning-state UI wiring lands with the family-neutral
-                    // app pass; this task only introduces the event.
-                    break
+                case .reasoning(let flag):
+                    continuation.yield(.reasoning(flag))
                 case .token(let index, _, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
@@ -836,9 +1072,25 @@ actor RealInferenceSession {
                     request: request, prefillConfig: prefillConfig,
                     progress: progress, memorySampler: memorySampler,
                     report: report)
+            } else if let model, model.config.family == .lfm2Moe {
+                guard let lfmTokenizer = tokenizer as? LFM2Tokenizer,
+                      let lfmRunner = runner as? LFM2ForwardRunner else {
+                    throw AppInferenceError.modelLoadFailed(
+                        "the loaded tokenizer and runner are not the LFM pair")
+                }
+                outcome = try await runOneShotLFM(
+                    request: request, runner: lfmRunner, tokenizer: lfmTokenizer,
+                    ctx: ctx, scratch: scratch, prefillConfig: prefillConfig,
+                    progress: progress, memorySampler: memorySampler,
+                    report: report)
             } else {
+                guard let gemmaTokenizer = tokenizer as? GFTokenizer,
+                      let realRunner = runner as? RealForwardRunner else {
+                    throw AppInferenceError.modelLoadFailed(
+                        "the loaded tokenizer and runner are not the Gemma pair")
+                }
                 outcome = try await runOneShot(
-                    request: request, runner: runner, tokenizer: tokenizer,
+                    request: request, runner: realRunner, tokenizer: gemmaTokenizer,
                     ctx: ctx, scratch: scratch, prefillConfig: prefillConfig,
                     progress: progress, memorySampler: memorySampler,
                     report: report)
@@ -960,8 +1212,9 @@ actor RealInferenceSession {
     /// The forward count is `generated - 1`: each loop iteration that continues
     /// ends with one `produce`; the final sampled token never runs a forward.
     private func runnerDiagnostics(progress: ProgressState, generated: Int) -> AppRunnerDiagnostics? {
-        guard let runner, let base = progress.countersAtDecodeStart, generated > 1 else { return nil }
-        let now = RunnerCounterSnapshot(runner)
+        guard let runner, let base = progress.countersAtDecodeStart, generated > 1,
+              let realRunner = runner as? RealForwardRunner else { return nil }
+        let now = RunnerCounterSnapshot(realRunner)
         let forwards = Double(generated - 1)
         func ms(_ end: UInt64, _ start: UInt64) -> Double {
             Double(end &- start) / 1_000_000 / forwards

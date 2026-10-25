@@ -233,6 +233,39 @@ import TurboFieldfare
         let client = RealInferenceClient()
         await client.unload()
     }
+
+    @Test func reasoningProgressMapsToTheAppEvent() {
+        #expect(AppInferenceEvent.reasoning(true) == .reasoning(true))
+        #expect(AppInferenceEvent.reasoning(false) == .reasoning(false))
+    }
+
+    @Test func lfmImageRequestIsRefusedBeforeGeneration() async throws {
+        let directory = try makeInstalledModelDirectory(family: .lfm2Moe)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = RealInferenceClient()
+        let request = AppGenerationRequest(
+            modelDirectory: directory,
+            prompt: "hi",
+            imageAttachments: [StagedImage(
+                fileURL: URL(fileURLWithPath: "/tmp/x.png"),
+                displayName: "x.png", encodedBytes: 1, sha256: "0")])
+        var iterator = client.generate(request).makeAsyncIterator()
+        do {
+            while let event = try await iterator.next() {
+                if case .failed(let error, _) = event {
+                    guard case .imagesUnsupported(.lfm2Moe) = error else {
+                        Issue.record("unexpected error \(error)"); return
+                    }
+                    return
+                }
+            }
+            Issue.record("expected refusal")
+        } catch let error as AppInferenceError {
+            guard case .imagesUnsupported(.lfm2Moe) = error else {
+                Issue.record("unexpected error \(error)"); return
+            }
+        }
+    }
 }
 
 private final class StateRecorder: @unchecked Sendable {

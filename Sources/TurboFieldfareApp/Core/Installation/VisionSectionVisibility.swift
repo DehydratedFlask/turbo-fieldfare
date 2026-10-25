@@ -19,8 +19,9 @@ public enum VisionSectionVisibility {
         isModelInstalled: Bool,
         isVisionPackInstalled: Bool,
         isCompanionOperationInProgress: Bool,
-        installState: AppModelInstallState
+        installState: AppModelInstallState,
+        isVisionAvailable: Bool = true
     ) -> Bool {
-        visionRuntimeEnabled
+        visionRuntimeEnabled && isVisionAvailable
     }
 }

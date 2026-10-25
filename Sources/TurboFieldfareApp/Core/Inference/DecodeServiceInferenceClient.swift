@@ -274,6 +274,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             continuation.yield(.memorySample)
                             continue
                         }
+                        if event.kind == .reasoning {
+                            guard let thinking = event.thinking else {
+                                throw AppInferenceError.unknown(
+                                    "decode service reasoning event had no state")
+                            }
+                            continuation.yield(.reasoning(thinking))
+                            continue
+                        }
                         if event.kind == .prefill || event.kind == .snapshot {
                             guard event.sequence == expectedSequence else {
                                 throw AppInferenceError.unknown(

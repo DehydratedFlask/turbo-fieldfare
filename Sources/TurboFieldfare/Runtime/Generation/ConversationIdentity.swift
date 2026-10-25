@@ -1,7 +1,10 @@
 import Foundation
+import TurboFieldfareFormat
 
 public enum ConversationIdentityError: Error, CustomStringConvertible {
     case snapshotHashUnavailable
+    case missingTokenizerIdentity
+    case familyMismatch(installed: ModelFamily, expected: ModelFamily)
 
     public var description: String {
         switch self {
@@ -9,6 +12,12 @@ public enum ConversationIdentityError: Error, CustomStringConvertible {
             "the loaded model's manifest carries no source snapshot hash, so a "
                 + "conversation recorded against it could not be told apart from "
                 + "one recorded against a different checkpoint"
+        case .missingTokenizerIdentity:
+            "the installed model has no tokenizer/identity.json, so its chat "
+                + "framing cannot be verified; reinstall the model"
+        case .familyMismatch(let installed, let expected):
+            "the tokenizer identity belongs to \(installed.rawValue), but the "
+                + "model is \(expected.rawValue)"
         }
     }
 }
@@ -40,9 +49,9 @@ public struct ConversationIdentity: Sendable, Equatable, Codable {
         self.imageProcessingVersion = imageProcessingVersion
     }
 
-    /// The identity of a loaded model. The chat framing is the tokenizer's
-    /// declared template identity, which is a type-level constant because the
-    /// renderer is hand-written Swift with no template file to hash.
+    /// The identity of a loaded model. Gemma keeps its constant identity, so
+    /// existing conversations still load. LFM reads the installed sidecar and
+    /// has no image processor (version 0).
     ///
     /// Throws rather than substituting a placeholder for a missing snapshot
     /// hash: an identity that cannot be established has to refuse replay, and a
@@ -51,27 +60,64 @@ public struct ConversationIdentity: Sendable, Equatable, Codable {
         guard let snapshot = model.sourceSnapshotHash, !snapshot.isEmpty else {
             throw ConversationIdentityError.snapshotHashUnavailable
         }
+        let framing = try Self.framing(at: model.directoryURL,
+                                       family: model.config.family)
         self.init(modelID: model.modelID,
                   sourceSnapshotHash: snapshot,
-                  templateIdentity: GFTokenizer.chatTemplateIdentity,
-                  imageProcessingVersion: VisionImageProcessing.version)
+                  templateIdentity: framing.identity,
+                  imageProcessingVersion: framing.imageVersion)
     }
 
-    /// The identity of an installed model, from its manifest alone.
+    /// The identity of an installed model, from its manifest and tokenizer
+    /// sidecar alone.
     ///
     /// The app process needs this and never loads the model: the decode service
     /// does. Reading the manifest costs a few kilobytes and stays well inside
     /// the rule that no path holds model-derived data in the heap.
     public static func forModelDirectory(_ directoryURL: URL) throws -> ConversationIdentity {
+        let family = try ManifestReader.peekFamily(directoryURL: directoryURL)
+        guard let config = ArchConfig.canonical(for: family) else {
+            throw ConversationIdentityError.familyMismatch(
+                installed: family, expected: family)
+        }
         let manifest = try ManifestReader.load(
-            directoryURL: directoryURL, expecting: .gemma4_26B_A4B)
+            directoryURL: directoryURL, expecting: config)
         guard let snapshot = manifest.sourceSnapshotHash, !snapshot.isEmpty else {
             throw ConversationIdentityError.snapshotHashUnavailable
         }
+        let framing = try framing(at: directoryURL, family: family)
         return ConversationIdentity(
             modelID: manifest.modelID,
             sourceSnapshotHash: snapshot,
-            templateIdentity: GFTokenizer.chatTemplateIdentity,
-            imageProcessingVersion: VisionImageProcessing.version)
+            templateIdentity: framing.identity,
+            imageProcessingVersion: framing.imageVersion)
+    }
+
+    private static func framing(
+        at directoryURL: URL,
+        family: ModelFamily
+    ) throws -> (identity: String, imageVersion: Int) {
+        switch family {
+        case .gemma4:
+            return (GFTokenizer.chatTemplateIdentity, VisionImageProcessing.version)
+        case .lfm2Moe:
+            let sidecar = directoryURL.standardizedFileURL
+                .appendingPathComponent("tokenizer", isDirectory: true)
+            guard FileManager.default.fileExists(
+                atPath: sidecar.appendingPathComponent(TokenizerIdentity.fileName).path) else {
+                throw ConversationIdentityError.missingTokenizerIdentity
+            }
+            let identity: TokenizerIdentity
+            do {
+                identity = try TokenizerIdentity.load(from: sidecar)
+            } catch {
+                throw ConversationIdentityError.missingTokenizerIdentity
+            }
+            guard identity.family == family else {
+                throw ConversationIdentityError.familyMismatch(
+                    installed: identity.family, expected: family)
+            }
+            return (identity.chatTemplateIdentity, 0)
+        }
     }
 }

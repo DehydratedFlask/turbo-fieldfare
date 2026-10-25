@@ -67,6 +67,12 @@ struct OutputPaneView: View {
                         .padding(8)
                 }
             }
+            .overlay(alignment: .bottomLeading) {
+                if model.isThinking && model.outputResponsePlainText.isEmpty {
+                    ThinkingIndicator()
+                        .padding(12)
+                }
+            }
             .padding(.horizontal, 24)
             .padding(.vertical, 20)
     }
@@ -878,6 +884,28 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.invalidate()
+    }
+}
+
+private struct ThinkingIndicator: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Thinking…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background {
+            Capsule().fill(Color(nsColor: .controlBackgroundColor))
+                .overlay {
+                    Capsule().stroke(.separator.opacity(0.5), lineWidth: 0.5)
+                }
+        }
+        .accessibilityIdentifier(.thinkingIndicator)
+        .accessibilityLabel("Thinking")
     }
 }
 

@@ -16,37 +16,46 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         "\(tokens / 1_024)K"
     }
 
-    /// The architecture every figure on this type is derived from. The menu
-    /// only ever offers contexts for the model the app ships with.
-    private static let architecture = ArchConfig.gemma4_26B_A4B
+    /// Every figure comes from the active model's architecture; the
+    /// no-argument properties keep Gemma as the compatibility default.
+    public func fp16KVBytes(config: ArchConfig = .gemma4_26B_A4B) -> UInt64 {
+        ContextAdmission.fp16KVBytes(config: config, maxContext: tokens)
+    }
 
-    /// Delegated rather than recomputed: the menu label, the loader's refusal,
-    /// the server's and the CLI's answers all have to be the same arithmetic,
-    /// and they were not when each surface carried its own copy.
-    public var fp16KVBytes: UInt64 {
-        ContextAdmission.fp16KVBytes(config: Self.architecture, maxContext: tokens)
+    public var fp16KVBytes: UInt64 { fp16KVBytes(config: .gemma4_26B_A4B) }
+
+    public func projectedFootprintBytes(config: ArchConfig = .gemma4_26B_A4B) -> UInt64 {
+        ContextAdmission.projectedFootprintBytes(config: config, maxContext: tokens)
     }
 
     public var projectedFootprintBytes: UInt64 {
-        ContextAdmission.projectedFootprintBytes(config: Self.architecture,
-                                                 maxContext: tokens)
+        projectedFootprintBytes(config: .gemma4_26B_A4B)
+    }
+
+    public func minimumHostMemoryBytes(config: ArchConfig = .gemma4_26B_A4B) -> UInt64 {
+        ContextAdmission.minimumHostMemoryBytes(config: config, maxContext: tokens)
     }
 
     public var minimumHostMemoryBytes: UInt64 {
-        ContextAdmission.minimumHostMemoryBytes(config: Self.architecture,
-                                                maxContext: tokens)
+        minimumHostMemoryBytes(config: .gemma4_26B_A4B)
     }
 
-    public func availability(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> ContextAdmission.Availability {
-        ContextAdmission.availability(config: Self.architecture,
+    public func availability(hostMemoryBytes: UInt64,
+                             expertCacheSlots: Int = 16,
+                             config: ArchConfig = .gemma4_26B_A4B) -> ContextAdmission.Availability {
+        ContextAdmission.availability(config: config,
                                       maxContext: tokens,
-                                      hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                      hostMemoryBytes: hostMemoryBytes,
+                                      expertCacheSlots: expertCacheSlots)
     }
 
-    public func needDescription(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> String {
-        ContextAdmission.needDescription(config: Self.architecture,
+    public func needDescription(hostMemoryBytes: UInt64,
+                                expertCacheSlots: Int = 16,
+                                config: ArchConfig = .gemma4_26B_A4B) -> String {
+        ContextAdmission.needDescription(config: config,
                                          maxContext: tokens,
-                                         hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+                                         hostMemoryBytes: hostMemoryBytes,
+                                         expertCacheSlots: expertCacheSlots)
     }
 
     /// The options this host can actually back, in ascending order.
@@ -55,16 +64,26 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// it — one full-attention layer over sixteen rows already costs the whole
     /// 1,085 MiB — so admission is decided by the cap, never by how much of it
     /// a conversation happens to use.
-    public static func available(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> [AppContextLengthOption] {
-        allCases.filter { $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) == .available }
+    public static func available(on hostMemoryBytes: UInt64,
+                                 expertCacheSlots: Int = 16,
+                                 config: ArchConfig = .gemma4_26B_A4B) -> [AppContextLengthOption] {
+        allCases.filter {
+            $0.availability(hostMemoryBytes: hostMemoryBytes,
+                            expertCacheSlots: expertCacheSlots,
+                            config: config) == .available
+        }
     }
 
     /// The largest context this host can back, for clamping a stored choice it
     /// cannot. A host too small even for the smallest option still gets one:
     /// the loader refuses an unbacked context before it allocates, so the
     /// refusal is where that machine is told, not a menu with no rows in it.
-    public static func largestAvailable(on hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> AppContextLengthOption {
-        available(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots).last ?? .fourK
+    public static func largestAvailable(on hostMemoryBytes: UInt64,
+                                        expertCacheSlots: Int = 16,
+                                        config: ArchConfig = .gemma4_26B_A4B) -> AppContextLengthOption {
+        available(on: hostMemoryBytes,
+                  expertCacheSlots: expertCacheSlots,
+                  config: config).last ?? .fourK
     }
 
     public static let defaultOption: AppContextLengthOption = .eightK
@@ -72,11 +91,14 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     /// The default row is labeled as such; every other row shows its FP16 KV
     /// allocation relative to the default, computed from `fp16KVBytes` rather
     /// than hardcoded so a default change moves every delta with it.
-    public var menuLabel: String {
+    public func menuLabel(config: ArchConfig = .gemma4_26B_A4B) -> String {
         guard self != Self.defaultOption else { return "\(shortLabel), Default" }
-        let delta = Int64(fp16KVBytes) - Int64(Self.defaultOption.fp16KVBytes)
+        let delta = Int64(fp16KVBytes(config: config))
+            - Int64(Self.defaultOption.fp16KVBytes(config: config))
         return "\(shortLabel), \(Self.formattedDelta(delta))"
     }
+
+    public var menuLabel: String { menuLabel(config: .gemma4_26B_A4B) }
 
     private static func formattedDelta(_ bytes: Int64) -> String {
         let sign = bytes < 0 ? "-" : "+"

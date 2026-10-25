@@ -608,6 +608,24 @@ import Testing
         #expect(model.selectedModelID == before)
     }
 
+    @MainActor
+    @Test func reasoningStateDrivesTheThinkingIndicator() {
+        let model = AppModel(client: MockInferenceClient(),
+                             installer: MockModelInstallerClient())
+        #expect(!model.isThinking)
+        model.apply(.reasoning(true))
+        #expect(model.isThinking)
+        model.apply(.reasoning(false))
+        #expect(!model.isThinking)
+        model.apply(.reasoning(true))
+        model.apply(.finished(AppDiagnostics(
+            generatedTokens: 0, stopReason: .eos,
+            timeToFirstTokenSeconds: nil, decodeSeconds: 0,
+            tokensPerSecond: 0, peakMemoryBytes: nil,
+            runtimeOptions: AppRuntimeOptions())))
+        #expect(!model.isThinking)
+    }
+
     private func makeSettingsRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppModelContext-\(UUID().uuidString)",

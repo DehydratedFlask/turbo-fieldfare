@@ -66,6 +66,7 @@ public enum AccessibilityID: String, CaseIterable, Sendable {
     case transcriptCopyResponse = "transcript.copyResponse"
     case transcriptLoad = "transcript.load"
     case transcriptReload = "transcript.reload"
+    case thinkingIndicator = "transcript.thinking"
 
     case noticeRaiseContext = "notice.raiseContext"
     case noticeNewChat = "notice.newChat"

@@ -205,6 +205,8 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     case ready
     case prefill
     case snapshot
+    /// The assistant entered or left its suppressed reasoning channel.
+    case reasoning
     /// Carries a live memory reading while image encoding or another silent
     /// phase has not produced progress or tokens yet.
     case memory
@@ -300,6 +302,9 @@ public struct DecodeServiceEvent: Codable, Sendable {
     /// Tokens the conversation's KV holds after this turn, for the context
     /// gauge. Nil outside conversation mode.
     public var conversationTokenCount: Int?
+    /// Present on a `.reasoning` frame: true while the model is in its
+    /// suppressed reasoning channel.
+    public var thinking: Bool?
     /// The lineage this event belongs to, so a late event from a replaced
     /// conversation can be dropped rather than shown under the new one.
     public var conversationEpoch: UUID?
@@ -338,7 +343,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 boundaryTokenIDs: [Int32]? = nil,
                 boundaryNeedsReplay: Bool? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
-                runner: DecodeRunnerDiagnostics? = nil) {
+                runner: DecodeRunnerDiagnostics? = nil,
+                thinking: Bool? = nil) {
         self.kind = kind
         self.generationID = generationID
         self.sequence = sequence
@@ -366,6 +372,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.boundaryNeedsReplay = boundaryNeedsReplay
         self.prefill = prefill
         self.runner = runner
+        self.thinking = thinking
     }
 }
 

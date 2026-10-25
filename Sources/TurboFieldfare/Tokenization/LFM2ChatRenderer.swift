@@ -28,8 +28,7 @@ public struct LFM2ChatRenderer: Sendable {
 
     public func render(messages: [ChatMessage],
                        tools: [ToolDefinition]?,
-                       addGenerationPrompt: Bool) throws -> String {
-        var output = "<|startoftext|>"
+                       addGenerationPrompt: Bool) throws -> String {        var output = "<|startoftext|>"
         var firstRendered = 0
 
         if let first = messages.first, first.role == .system {
@@ -51,6 +50,15 @@ public struct LFM2ChatRenderer: Sendable {
             output += "<|im_start|>assistant\n thinking"
         }
         return output
+    }
+
+    /// Appends a user turn to a KV that already ends at an assistant turn's
+    /// last visible token (the `<|im_end|>` stop was withheld). Used after a
+    /// restored conversation, where the token history exists but the message
+    /// text was never loaded.
+    public func continuationPrompt(userContent: String) -> String {
+        "<|im_end|>\n<|im_start|>user\n\(userContent)<|im_end|>\n"
+            + "<|im_start|>assistant\n thinking"
     }
 
     private func renderSystem(_ message: ChatMessage,

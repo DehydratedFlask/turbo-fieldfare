@@ -148,6 +148,7 @@ public struct AppTokenEvent: Equatable, Sendable {
 public enum AppInferenceEvent: Equatable, Sendable {
     case prefillProgress(done: Int, total: Int)
     case memorySample
+    case reasoning(Bool)
     case token(AppTokenEvent)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)

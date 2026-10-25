@@ -79,6 +79,8 @@ public final class AppModel {
     var serviceEpoch: UUID?
     public var outputText: String = ""
     public var runState: RunState = .idle
+    /// True while LFM is inside its suppressed reasoning channel.
+    public private(set) var isThinking = false
     public var runtimeOptions = AppRuntimeOptions()
     public var maxNewTokensOverride: Int?
     /// Settable only through `setMaxContextTokens`, because changing it changes
@@ -345,9 +347,12 @@ public final class AppModel {
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
+        let initialConfig = ArchConfig.canonical(for: selectedDescriptor.family)
+            ?? .gemma4_26B_A4B
         let admitted = Self.admittedContext(settings.contextTokens,
                                             hostMemoryBytes: hostMemoryBytes,
-                                            expertCacheSlots: savedSlots)
+                                            expertCacheSlots: savedSlots,
+                                            config: initialConfig)
         self.maxContextTokens = admitted.tokens
         self.contextClampNotice = admitted.notice
         self.temperature = settings.temperature
@@ -411,7 +416,10 @@ public final class AppModel {
 
     /// What the Context picker may offer on this Mac.
     public var contextOptions: [AppContextLengthOption] {
-        AppContextLengthOption.available(on: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)
+        AppContextLengthOption.available(
+            on: hostMemoryBytes,
+            expertCacheSlots: runtimeOptions.expertCacheSlots,
+            config: selectedArchConfig)
     }
 
     /// The caption under the Context picker when admission is hiding rows.
@@ -419,18 +427,28 @@ public final class AppModel {
     /// Static and free of SwiftUI so the sentence a user reads is covered by a
     /// test rather than by looking at the window. Nil when every size is
     /// offered — there is then nothing to explain.
-    public nonisolated static func contextOptionsNote(hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> String? {
+    public nonisolated static func contextOptionsNote(
+        hostMemoryBytes: UInt64,
+        expertCacheSlots: Int = 16,
+        config: ArchConfig = .gemma4_26B_A4B
+    ) -> String? {
         let hidden = AppContextLengthOption.allCases.filter {
-            $0.availability(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) != .available
+            $0.availability(hostMemoryBytes: hostMemoryBytes,
+                            expertCacheSlots: expertCacheSlots,
+                            config: config) != .available
         }
         guard !hidden.isEmpty else { return nil }
         return hidden
-            .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) }
+            .map { $0.needDescription(hostMemoryBytes: hostMemoryBytes,
+                                      expertCacheSlots: expertCacheSlots,
+                                      config: config) }
             .joined(separator: " ")
     }
 
     public var contextOptionsNote: String? {
-        Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)
+        Self.contextOptionsNote(hostMemoryBytes: hostMemoryBytes,
+                                expertCacheSlots: runtimeOptions.expertCacheSlots,
+                                config: selectedArchConfig)
     }
 
     /// A stored context this host cannot back, replaced with the largest it
@@ -442,14 +460,15 @@ public final class AppModel {
     nonisolated static func admittedContext(
         _ tokens: Int,
         hostMemoryBytes: UInt64,
-        expertCacheSlots: Int = 16
+        expertCacheSlots: Int = 16,
+        config: ArchConfig = .gemma4_26B_A4B
     ) -> (tokens: Int, notice: String?) {
-        let config = ArchConfig.gemma4_26B_A4B
         guard case .needsMemory = ContextAdmission.availability(
             config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) else {
             return (tokens, nil)
         }
-        let fallback = AppContextLengthOption.largestAvailable(on: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+        let fallback = AppContextLengthOption.largestAvailable(
+            on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, config: config)
         let need = ContextAdmission.needDescription(config: config,
                                                     maxContext: tokens,
                                                     hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
@@ -1024,6 +1043,13 @@ public final class AppModel {
             .deletingLastPathComponent()
             .appendingPathComponent(descriptor.defaultFilename, isDirectory: true)
         await changeModelURL(target, persistSelection: true)
+        let admitted = Self.admittedContext(
+            maxContextTokens,
+            hostMemoryBytes: hostMemoryBytes,
+            expertCacheSlots: runtimeOptions.expertCacheSlots,
+            config: selectedArchConfig)
+        maxContextTokens = admitted.tokens
+        contextClampNotice = admitted.notice
     }
 
     /// Internal callers already validated their candidate; UI uses selectModelLocation.
@@ -1156,7 +1182,8 @@ public final class AppModel {
         runtimeOptions.expertCacheSlots = slots
         let admitted = Self.admittedContext(maxContextTokens,
                                             hostMemoryBytes: hostMemoryBytes,
-                                            expertCacheSlots: slots)
+                                            expertCacheSlots: slots,
+                                            config: selectedArchConfig)
         if admitted.tokens != maxContextTokens {
             setMaxContextTokens(admitted.tokens)
             contextClampNotice = admitted.notice
@@ -1263,7 +1290,7 @@ public final class AppModel {
     /// offered an Add-images button with no tower behind it, and the failure
     /// only surfaced when the user pressed Generate.
     public var isImageInputAvailable: Bool {
-        isVisionRuntimeSupported && isVisionPackInstalled
+        isVisionAvailable && isVisionRuntimeSupported && isVisionPackInstalled
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
@@ -2523,6 +2550,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
+        isThinking = false
         // Only the intent is recorded here; the next turn opens the new lineage
         // on the inference side. Resetting eagerly as well raced that opening
         // and sent two resets for one new chat, and it buys nothing: the KV
@@ -2974,8 +3002,11 @@ public final class AppModel {
             livePrefillDone = done
             livePrefillTotal = total
             sampleLiveMemory()
+        case .reasoning(let thinking):
+            isThinking = thinking
         case .token(let token):
             phase = .decode
+            isThinking = false
             liveTokenCount = token.index + 1
             liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
             sampleLiveMemory()
@@ -2983,11 +3014,14 @@ public final class AppModel {
                 outputText += token.textDelta
             }
         case .finished(let diagnostics):
+            isThinking = false
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             finishSuccessfully(diagnostics)
         case .cancelled(let diagnostics):
+            isThinking = false
             finishCancelled(diagnostics)
         case .failed(let appError, let partial):
+            isThinking = false
             diagnostics = partial
             materializeServiceTranscript()
             finishWithError(appError)

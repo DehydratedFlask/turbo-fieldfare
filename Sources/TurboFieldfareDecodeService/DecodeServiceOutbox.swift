@@ -13,6 +13,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         var pendingText = ""
         var latestPrefill: PrefillProgress?
         var latestToken: AppTokenEvent?
+        var pendingThinking: Bool?
+        var lastSentThinking: Bool?
         var terminal: DecodeServiceEvent?
         var terminalCommitted = false
         var finished = false
@@ -54,6 +56,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         case .token(let token):
             state.pendingText += token.textDelta
             state.latestToken = token
+        case .reasoning(let thinking):
+            state.pendingThinking = thinking
+            condition.signal()
         case .finished(let diagnostics):
             if !state.terminalCommitted {
                 state.terminal = terminal(.finished, diagnostics: diagnostics)
@@ -103,11 +108,13 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             let prefill = state.latestPrefill
             let text = state.pendingText
             let token = state.latestToken
+            let thinking = state.pendingThinking
             let terminal = state.terminal
             let done = state.finished
             state.latestPrefill = nil
             state.pendingText = ""
             state.latestToken = nil
+            state.pendingThinking = nil
             state.terminal = nil
             var prefillSequence: UInt64?
             if prefill != nil {
@@ -119,11 +126,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 state.sequence &+= 1
                 tokenSequence = state.sequence
             }
+            let thinkingChanged = thinking.map { $0 != state.lastSentThinking } ?? false
+            if let thinking { state.lastSentThinking = thinking }
             condition.unlock()
 
             _ = memorySampler.sample()
 
-            if prefill == nil, text.isEmpty, token == nil, terminal == nil, !done {
+            if prefill == nil, text.isEmpty, token == nil, thinking == nil,
+               terminal == nil, !done {
                 let snapshot = DecodeServiceEvent(
                     kind: .memory, generationID: generationID,
                     currentMemoryBytes: memorySampler.sample(),
@@ -153,6 +163,15 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes())
+                try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+            }
+            if thinkingChanged, let thinking {
+                let snapshot = DecodeServiceEvent(
+                    kind: .reasoning, generationID: generationID,
+                    currentMemoryBytes: memorySampler.sample(),
+                    peakMemoryBytes: memorySampler.peakBytes,
+                    visionTowerMappedBytes: towerBytes(),
+                    thinking: thinking)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
             }
             if let terminal {

@@ -131,6 +131,42 @@ import TurboFieldfareDecodeProtocol
         #expect(writerFinished.wait(timeout: .now() + 5) == .success)
     }
 
+    @Test func reasoningFramesFlushTextBeforeClosingTheChannel() throws {
+        let outbox = DecodeServiceOutbox(generationID: UUID())
+        let pipe = Pipe()
+        let writer = Thread {
+            try? outbox.runWriter(to: pipe.fileHandleForWriting)
+        }
+        writer.start()
+        defer { try? pipe.fileHandleForWriting.close() }
+
+        outbox.publish(.reasoning(true))
+        let opening = try DecodeFrameCodec.read(
+            DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+        #expect(opening.kind == .reasoning)
+        #expect(opening.thinking == true)
+
+        outbox.publish(.token(AppTokenEvent(
+            index: 0, textDelta: "answer", elapsedDecodeSeconds: 0)))
+        outbox.publish(.reasoning(false))
+        outbox.publish(.finished(diagnostics(stopReason: .eos)))
+
+        var frames: [DecodeServiceEvent] = []
+        while true {
+            let event = try DecodeFrameCodec.read(
+                DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+            frames.append(event)
+            if event.kind == .finished { break }
+        }
+        let textIndex = try #require(frames.firstIndex {
+            $0.kind == .snapshot && $0.textDelta == "answer"
+        })
+        let closeIndex = try #require(frames.firstIndex {
+            $0.kind == .reasoning && $0.thinking == false
+        })
+        #expect(textIndex < closeIndex)
+    }
+
     private func firstTerminal(
         from outbox: DecodeServiceOutbox,
         published event: AppInferenceEvent,

@@ -36,7 +36,8 @@ struct InspectorView: View {
             isModelInstalled: model.isModelInstalled,
             isVisionPackInstalled: model.isVisionPackInstalled,
             isCompanionOperationInProgress: model.isVisionCompanionOperationInProgress,
-            installState: model.visionInstallState)
+            installState: model.visionInstallState,
+            isVisionAvailable: model.isVisionAvailable)
     }
 
     private var visionSection: some View {
@@ -303,7 +304,7 @@ struct InspectorView: View {
                 // would put a row in the menu that every load then refuses.
                 Picker("Context", selection: contextTokensBinding) {
                     ForEach(model.contextOptions) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                        Text(option.menuLabel(config: model.selectedArchConfig)).tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)

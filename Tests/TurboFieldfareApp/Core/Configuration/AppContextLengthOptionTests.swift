@@ -105,4 +105,21 @@ import TurboFieldfare
                 "the default context was hidden on a \(host)-byte host")
         }
     }
+
+    @Test func lfmContextOptionsUseLFMCacheGeometry() {
+        let lfm = ArchConfig.lfm2_5_24B_A2B
+        let options = AppContextLengthOption.available(
+            on: 8 << 30, expertCacheSlots: 8, config: lfm)
+        #expect(options.contains(.eightK))
+        #expect(options.contains(.sixteenK))
+        #expect(!options.contains(.twoFiftySixK))
+        #expect(AppContextLengthOption.eightK.fp16KVBytes(config: lfm) == 167_772_160)
+    }
+
+    @Test func gemmaContextOptionsAreUnchanged() {
+        let gemma = ArchConfig.gemma4_26B_A4B
+        #expect(AppContextLengthOption.eightK.fp16KVBytes(config: gemma) == 434_831_360)
+        #expect(AppContextLengthOption.available(
+            on: 64 << 30, expertCacheSlots: 16, config: gemma).contains(.eightK))
+    }
 }

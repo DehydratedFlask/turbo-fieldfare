@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertible {
     case invalidRequest(String)
@@ -6,6 +7,8 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
     case modelLoadFailed(String)
     case tokenizerUnavailable(String)
     case contextOverflow(prompt: Int, maxNew: Int, maxContext: Int)
+    /// The loaded family has no image tower.
+    case imagesUnsupported(ModelFamily)
     /// A chat that no longer leaves room for a reply. Separate from
     /// `contextOverflow` because the figure that matters is not the user's
     /// requested reply length but the floor a turn keeps free, and because the
@@ -46,8 +49,7 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
         switch self {
         case .invalidRequest(let message), .modelNotFound(let message),
              .modelLoadFailed(let message), .tokenizerUnavailable(let message),
-             .conversationLineageLost(let message),
-             .conversationRestoreFailed(let message),
+             .conversationLineageLost(let message),             .conversationRestoreFailed(let message),
              .conversationPersistenceFailed(let message),
              .conversationUnreadable(let message), .connectionLost(let message),
              .unknown(let message):
@@ -69,6 +71,8 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
             return "Tokenizer unavailable: \(message)"
         case .contextOverflow(let prompt, let maxNew, let maxContext):
             return "Prompt (\(prompt) tokens) plus max response (\(maxNew)) exceeds the \(maxContext)-token context."
+        case .imagesUnsupported(let family):
+            return "image input is not supported for \(family.rawValue)"
         case .conversationContextExhausted(let prompt, let reserve, let maxContext):
             return "This chat holds \(prompt) tokens and keeps \(reserve) free for a reply, which is more than the \(maxContext)-token context. Raise the context length or start a new chat."
         case .generationInFlight:
