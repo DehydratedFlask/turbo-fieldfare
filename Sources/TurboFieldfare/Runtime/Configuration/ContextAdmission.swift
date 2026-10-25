@@ -45,6 +45,7 @@ public enum ContextAdmission {
     public enum Availability: Equatable, Sendable {
         case available
         case needsMemory(minimumHostBytes: UInt64)
+        case exceedsModel(maximum: Int)
     }
 
     /// Rows the production runtime allocates per sliding-window layer.
@@ -108,6 +109,9 @@ public enum ContextAdmission {
     public static func availability(config: ArchConfig,
                                     maxContext: Int,
                                     hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> Availability {
+        guard maxContext <= config.maxPositionEmbeddings else {
+            return .exceedsModel(maximum: config.maxPositionEmbeddings)
+        }
         let minimum = minimumHostMemoryBytes(config: config, maxContext: maxContext, expertCacheSlots: expertCacheSlots)
         return hostMemoryBytes >= minimum ? .available : .needsMemory(minimumHostBytes: minimum)
     }
@@ -119,6 +123,10 @@ public enum ContextAdmission {
     public static func needDescription(config: ArchConfig,
                                        maxContext: Int,
                                        hostMemoryBytes: UInt64, expertCacheSlots: Int = 16) -> String {
+        guard maxContext <= config.maxPositionEmbeddings else {
+            return "The model supports at most \(grouped(config.maxPositionEmbeddings)) tokens; "
+                + "\(grouped(maxContext)) is beyond its trained positions."
+        }
         let need = marketingGigabytesRoundedUp(
             minimumHostMemoryBytes(config: config, maxContext: maxContext, expertCacheSlots: expertCacheSlots))
         let have = marketingGigabytesNearest(hostMemoryBytes)

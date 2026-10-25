@@ -13,7 +13,7 @@ struct CLIRunFamilyTests {
             "--model", directory.path,
             "--chat-prompt", "hi",
             "--image", "/tmp/does-not-need-to-exist.png",
-        ])
+        ], manifestFamily: .lfm2Moe)
         let pipe = Pipe()
         let result = await run(args: args, stdout: .nullDevice,
                                stderr: pipe.fileHandleForWriting)
@@ -31,6 +31,17 @@ struct CLIRunFamilyTests {
                                 prefillTokens: 12, newTokens: 4, decodeSeconds: 1.5)
         #expect(footer.contains("LiquidAI/LFM2.5-24B-A2B-MLX-4bit"))
         #expect(footer.contains("family=lfm2_moe"))
+    }
+
+    @Test func lfmAllowsEightSlotsWithChunkedPrefill() throws {
+        let args = try Args.parse(
+            ["--model", "/tmp/lfm.gturbo", "--chat-prompt", "hi",
+             "--expert-cache-slots", "8"],
+            manifestFamily: .lfm2Moe)
+        #expect(args.family == .lfm2Moe)
+        #expect(args.expertCacheSlots == 8)
+        let config = try args.resolvedRuntimeConfiguration(forceLogitsHead: false)
+        #expect(config.prefillPolicy == .chunked)
     }
 
     @Test func gemmaPromptInputStillUsesTheUserRole() throws {

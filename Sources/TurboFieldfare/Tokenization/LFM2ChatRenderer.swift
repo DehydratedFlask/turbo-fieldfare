@@ -32,7 +32,8 @@ public struct LFM2ChatRenderer: Sendable {
         var firstRendered = 0
 
         if let first = messages.first, first.role == .system {
-            output += try renderSystem(first, tools: tools)
+            let system = try renderSystem(first, tools: tools)
+            if !system.isEmpty { output += system }
             firstRendered = 1
         } else if let tools, !tools.isEmpty {
             output += "<|im_start|>system\nList of tools: "
@@ -47,7 +48,7 @@ public struct LFM2ChatRenderer: Sendable {
         }
 
         if addGenerationPrompt {
-            output += "<|im_start|>assistant\n thinking"
+            output += "<|im_start|>assistant\n<think>"
         }
         return output
     }
@@ -58,7 +59,7 @@ public struct LFM2ChatRenderer: Sendable {
     /// text was never loaded.
     public func continuationPrompt(userContent: String) -> String {
         "<|im_end|>\n<|im_start|>user\n\(userContent)<|im_end|>\n"
-            + "<|im_start|>assistant\n thinking"
+            + "<|im_start|>assistant\n<think>"
     }
 
     private func renderSystem(_ message: ChatMessage,
@@ -68,6 +69,7 @@ public struct LFM2ChatRenderer: Sendable {
             if !body.isEmpty { body += "\n" }
             body += "List of tools: " + (try toolsJSON(tools))
         }
+        guard !body.isEmpty else { return "" }
         return "<|im_start|>system\n\(body)<|im_end|>\n"
     }
 

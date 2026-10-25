@@ -14,7 +14,7 @@ installed manifest.
 | Source index SHA-256 | `7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a` |
 | Download | about 13.57 GB |
 | Installed `.gturbo` | about 13.57 GB |
-| Source shards | 5 safetensors shards |
+| Source shards | 3 safetensors shards |
 
 The repacker streams the pinned ranges and verifies the source index before it
 reads a shard. It never stages the whole Hugging Face checkpoint.
@@ -80,7 +80,7 @@ The repacker accepts the checkpoint's raw `model.*` names:
 | `layers.N.self_attn.q_proj.weight` | 2048 × 2048 | resident, 4-bit |
 | `layers.N.self_attn.k_proj.weight` | 512 × 2048 | resident, 4-bit |
 | `layers.N.self_attn.v_proj.weight` | 512 × 2048 | resident, 4-bit |
-| `layers.N.self_attn.o_proj.weight` | 2048 × 2048 | resident, 4-bit |
+| `layers.N.self_attn.out_proj.weight` | 2048 × 2048 | resident, 4-bit (installed as `o_proj`) |
 | `layers.N.self_attn.q_layernorm.weight` | 64 | resident, BF16 |
 | `layers.N.self_attn.k_layernorm.weight` | 64 | resident, BF16 |
 | `layers.N.feed_forward.gate_proj.weight` | 11776 × 2048 | resident, 4-bit (N < 2) |
@@ -95,7 +95,8 @@ The repacker accepts the checkpoint's raw `model.*` names:
 Each quantized tensor carries BF16 `scales` and `biases` of shape
 `[rows, columns / 64]`. The 6-bit payload is MLX's least-significant-bits-first
 packing, four values into three bytes. The resident expert stride is 5,308,416
-bytes.
+bytes. The attention output projection is spelled `out_proj` in the checkpoint
+and installed as `o_proj`; the repacker translates that one name.
 
 ## Chat template
 

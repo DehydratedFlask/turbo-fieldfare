@@ -99,7 +99,7 @@ The Swift package exposes six products:
 
 ### Supported models
 
-| Model | Family | Install source | Default context | Expert-cache slots | Vision |
+| Model | Family | Install source | Server context | Server slots | Vision |
 | --- | --- | --- | --- | --- | --- |
 | Gemma 4 26B-A4B IT 4-bit (default) | `gemma4` | `--model-source gemma4` | 16,384 | 16 | Yes |
 | LFM2.5 24B-A2B 4-bit | `lfm2_moe` | `--model-source lfm2_moe` | 8,192 | 8 | No |
@@ -107,7 +107,9 @@ The Swift package exposes six products:
 Both models install as separate `.gturbo` directories and can sit side by
 side. The installed manifest's `arch.family` selects the tokenizer, runner,
 chat framing, and memory profile; a path is never guessed from its filename.
-Gemma 4 remains the default for new and existing users. See
+Gemma 4 remains the default for new and existing users. The app and CLI keep
+their existing 8,192-token default for Gemma and use 8,192 for LFM; the table's
+context and slot figures are the server/descriptor defaults. See
 [LFM2.5 24B-A2B](docs/LFM2_5.md) for the architecture, tensor map, and tool
 grammar.
 

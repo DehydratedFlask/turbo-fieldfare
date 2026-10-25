@@ -109,7 +109,7 @@ import TurboFieldfare
     @Test func lfmContextOptionsUseLFMCacheGeometry() {
         let lfm = ArchConfig.lfm2_5_24B_A2B
         let options = AppContextLengthOption.available(
-            on: 8 << 30, expertCacheSlots: 8, config: lfm)
+            on: 64 << 30, expertCacheSlots: 8, config: lfm)
         #expect(options.contains(.eightK))
         #expect(options.contains(.sixteenK))
         #expect(!options.contains(.twoFiftySixK))

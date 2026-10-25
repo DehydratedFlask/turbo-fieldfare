@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
     case lfu
@@ -77,7 +78,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         self.visionResidencyPolicy = visionResidencyPolicy
     }
 
-    public func validate() throws {
+    public func validate(family: ModelFamily = .gemma4) throws {
         guard Self.allowedSlotCounts.contains(expertCacheSlots) else {
             throw AppInferenceError.invalidRequest(
                 "expert cache slots must be one of \(Self.allowedSlotCounts)")
@@ -88,8 +89,10 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         }
         // Refused here rather than inside the first prefill chunk, which is
         // after the model load and, on an image turn, after every attachment
-        // has already been encoded on the GPU.
-        let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
+        // has already been encoded on the GPU. LFM's top-4 routing fits its
+        // 8-slot default; Gemma keeps the 16-slot floor.
+        let minimumSlots = family == .lfm2Moe
+            ? 8 : RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         guard !prefillEnabled || expertCacheSlots >= minimumSlots else {
             throw AppInferenceError.invalidRequest(
                 "Prefill needs at least \(minimumSlots) expert cache slots, and Slots is set to "
@@ -117,8 +120,11 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         }
     }
 
-    public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
-        try validate()
+    public func resolvedRuntimeConfiguration(
+        forceLogitsHead: Bool,
+        family: ModelFamily = .gemma4
+    ) throws -> RuntimeConfiguration {
+        try validate(family: family)
         return RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
             expertCachePolicy: expertCachePolicy == .lru ? .lru : .lfu,

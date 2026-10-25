@@ -481,8 +481,9 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.verifyingWeights))
+            let family = try ManifestReader.peekFamily(directoryURL: key.directory)
             let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
-                forceLogitsHead: key.forceLogitsHead)
+                forceLogitsHead: key.forceLogitsHead, family: family)
             let context: MetalContext
             if let ctx {
                 context = ctx

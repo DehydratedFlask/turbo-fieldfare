@@ -78,7 +78,8 @@ public struct ServerArguments: Equatable, Sendable {
                 alsoAccepting: ["auto"])
         }
         guard prefillPolicy == .off
-                || expertCacheSlots >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
+                || expertCacheSlots >= (family == .lfm2Moe
+                    ? 8 : RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
         else {
             throw ServerArgumentError.invalid(
                 "--expert-cache-slots \(expertCacheSlots) requires --prefill off")
@@ -235,10 +236,20 @@ public struct ServerArguments: Equatable, Sendable {
         // already started loading, with an allocator error that says nothing
         // about how much memory the choice actually needs.
         let config = ArchConfig.canonical(for: family) ?? .gemma4_26B_A4B
-        if case .needsMemory = ContextAdmission.availability(config: config,
-                                                             maxContext: maxContext,
-                                                             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots),
-           environment[unbackedContextOverrideVariable] != "1" {
+        let availability = ContextAdmission.availability(
+            config: config,
+            maxContext: maxContext,
+            hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+        switch availability {
+        case .available:
+            break
+        case .exceedsModel:
+            throw ServerArgumentError.invalid(
+                ContextAdmission.needDescription(config: config,
+                                                 maxContext: maxContext,
+                                                 hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots))
+        case .needsMemory:
+            guard environment[unbackedContextOverrideVariable] != "1" else { break }
             throw ServerArgumentError.invalid(
                 ContextAdmission.needDescription(config: config,
                                                  maxContext: maxContext,

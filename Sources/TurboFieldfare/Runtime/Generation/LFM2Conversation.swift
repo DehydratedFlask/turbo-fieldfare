@@ -26,7 +26,7 @@ public enum LFM2ConversationError: Error, Equatable, CustomStringConvertible {
 
 /// Text-only LFM conversation. Owns the runner's KV and conv state, keeps the
 /// user/assistant message history for re-rendering, and routes the model's
-/// ` thinking` channel through `LFM2AssistantDecoder` so reasoning never reaches
+/// `<think>` channel through `LFM2AssistantDecoder` so reasoning never reaches
 /// the visible answer or storage.
 public actor LFM2Conversation: ConversationSession {
     private let model: Model
@@ -121,15 +121,16 @@ public actor LFM2Conversation: ConversationSession {
         let start: RawCompletionStart
         let usedTokenOnlyHistory = !kvTokenIDs.isEmpty && messages.isEmpty
         let positionBefore = runner.continuationPosition
-        if kvTokenIDs.isEmpty {
-            promptIDs = try tokenizer.applyChatTemplate(
+        if kvTokenIDs.isEmpty {            promptIDs = try tokenizer.applyChatTemplate(
                 messages: [user], tools: nil, addGenerationPrompt: true)
             start = .reset
         } else if usedTokenOnlyHistory {
             guard runner.continuationPosition == kvTokenIDs.count else {
                 throw LFM2ConversationError.continuationMismatch
             }
-            promptIDs = kvTokenIDs + tokenizer.encodeTextContinuation(userContent: text)
+            let boundary = boundaryNeedsReplay ? uncommittedBoundary : []
+            promptIDs = kvTokenIDs + boundary
+                + tokenizer.encodeTextContinuation(userContent: text)
             start = .resume(cachedPromptTokens: kvTokenIDs.count)
         } else {
             let incoming = messages + [user]
@@ -167,6 +168,7 @@ public actor LFM2Conversation: ConversationSession {
         var runConfig = config
         runConfig.maxNewTokens = min(config.maxNewTokens,
                                      maxContext - promptIDs.count)
+        let rewindTarget = start == .reset ? 0 : positionBefore
         let decoder = LFM2AssistantDecoder(allowedTools: [])
         var visible = ""
         var decodeError: (any Error)?
@@ -236,7 +238,7 @@ public actor LFM2Conversation: ConversationSession {
             // A failed turn leaves an unknown amount of the KV advanced. Rewind
             // only within the runner's conv-state limit; a deeper turn condemns
             // the lineage, and the app shows New Chat instead of corrupting it.
-            if (try? runner.rewind(to: positionBefore)) == nil {
+            if (try? runner.rewind(to: rewindTarget)) == nil {
                 lineageBroken = true
             }
             pending.insert(text, at: 0)
@@ -244,7 +246,7 @@ public actor LFM2Conversation: ConversationSession {
         }
 
         if let decodeError {
-            if (try? runner.rewind(to: positionBefore)) == nil {
+            if (try? runner.rewind(to: rewindTarget)) == nil {
                 lineageBroken = true
             }
             pending.insert(text, at: 0)
@@ -253,13 +255,14 @@ public actor LFM2Conversation: ConversationSession {
         do {
             try decoder.finish()
         } catch {
-            if (try? runner.rewind(to: positionBefore)) == nil {
+            if (try? runner.rewind(to: rewindTarget)) == nil {
                 lineageBroken = true
             }
             pending.insert(text, at: 0)
             throw error
         }
 
+        let previousKVTokenIDs = kvTokenIDs
         kvTokenIDs = result.kvBackedTokenIDs
         if !usedTokenOnlyHistory {
             messages = messages + [user,
@@ -267,6 +270,19 @@ public actor LFM2Conversation: ConversationSession {
         }
         uncommittedBoundary = result.uncommittedBoundaryTokenIDs
         boundaryNeedsReplay = result.reason == .maxTokens || result.reason == .cancelled
+
+        // The transcript stores each turn's own prompt tokens and concatenates
+        // them. On a resuming turn the KV already holds the earlier prefix, so
+        // store only the suffix this turn added; a first turn stores the whole
+        // render.
+        let promptTokenIDs: [Int32]
+        if !previousKVTokenIDs.isEmpty,
+           promptIDs.count > previousKVTokenIDs.count,
+           Array(promptIDs.prefix(previousKVTokenIDs.count)) == previousKVTokenIDs {
+            promptTokenIDs = Array(promptIDs.dropFirst(previousKVTokenIDs.count))
+        } else {
+            promptTokenIDs = promptIDs
+        }
 
         return MultimodalTurnResult(
             text: visible,
@@ -278,7 +294,7 @@ public actor LFM2Conversation: ConversationSession {
             reason: result.reason,
             prefillSeconds: result.prefillSeconds,
             decodeSeconds: result.decodeSeconds,
-            promptTokenIDs: promptIDs,
+            promptTokenIDs: promptTokenIDs,
             generatedTokenIDs: Array(result.kvBackedTokenIDs.dropFirst(promptIDs.count)),
             uncommittedBoundaryTokenIDs: uncommittedBoundary,
             boundaryNeedsReplay: boundaryNeedsReplay)

@@ -109,6 +109,29 @@ private actor EchoBackend: ServerInferenceBackend {
         try await server.shutdown()
     }
 
+    /// An unsupported family uses the explicit unsupported-image code, not the
+    /// generic "vision unavailable" code a missing pack produces.
+    @Test func aFamilyWithoutVisionUsesTheUnsupportedImageCode() async throws {
+        let root = Self.makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model", queueLimit: 1, backend: EchoBackend(),
+            visionCapability: "unsupported", attachmentRoot: root)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let socket = try connectedSocket(port: port)
+        defer { _ = Darwin.close(socket) }
+
+        try writeAll(socket: socket, text: httpRequest(
+            port: port, body: Self.imageBody(count: 1), connection: "keep-alive"))
+        let response = try readUntil(
+            socket: socket, timeoutMilliseconds: 4_000,
+            condition: { $0.contains("HTTP/1.1 4") })
+        #expect(response.contains("unsupported_image"))
+        #expect(Self.stagedFileCount(root) == 0)
+        try await server.shutdown()
+    }
+
     /// Nothing may be written to disk for a request the router will not accept.
     /// Staging used to run before the method, path and content-type were even
     /// looked at, so `PUT /health` could fill the attachment directory.

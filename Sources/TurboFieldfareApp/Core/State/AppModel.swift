@@ -463,17 +463,17 @@ public final class AppModel {
         expertCacheSlots: Int = 16,
         config: ArchConfig = .gemma4_26B_A4B
     ) -> (tokens: Int, notice: String?) {
-        guard case .needsMemory = ContextAdmission.availability(
+        guard case .available = ContextAdmission.availability(
             config: config, maxContext: tokens, hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots) else {
-            return (tokens, nil)
+            let fallback = AppContextLengthOption.largestAvailable(
+                on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, config: config)
+            let need = ContextAdmission.needDescription(config: config,
+                                                        maxContext: tokens,
+                                                        hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
+            return (fallback.tokens,
+                    "\(need) Context is set to \(fallback.shortLabel) instead.")
         }
-        let fallback = AppContextLengthOption.largestAvailable(
-            on: hostMemoryBytes, expertCacheSlots: expertCacheSlots, config: config)
-        let need = ContextAdmission.needDescription(config: config,
-                                                    maxContext: tokens,
-                                                    hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots)
-        return (fallback.tokens,
-                "\(need) Context is set to \(fallback.shortLabel) instead.")
+        return (tokens, nil)
     }
 
     public var isRunning: Bool { runState == .running }
@@ -1552,12 +1552,14 @@ public final class AppModel {
         // sent to the decode service. A 262,144-token KV is charged in full
         // the moment a command buffer binds it, so a host that cannot hold it
         // does not find out part-way through a load: it is killed.
-        if case .needsMemory = ContextAdmission.availability(
-            config: ArchConfig.gemma4_26B_A4B,
+        if case .available = ContextAdmission.availability(
+            config: selectedArchConfig,
             maxContext: maxContext,
             hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots) {
+            // Admitted.
+        } else {
             loadState = .failed(.modelLoadFailed(
-                ContextAdmission.needDescription(config: ArchConfig.gemma4_26B_A4B,
+                ContextAdmission.needDescription(config: selectedArchConfig,
                                                  maxContext: maxContext,
                                                  hostMemoryBytes: hostMemoryBytes, expertCacheSlots: runtimeOptions.expertCacheSlots)))
             return
@@ -3133,6 +3135,7 @@ public final class AppModel {
     private func finishTerminalRun() {
         phase = .idle
         runState = .idle
+        isThinking = false
         isCancellationPending = false
         activeRunRuntimeKey = nil
         endTurnWait(generation: runIdentity)

@@ -15,6 +15,10 @@ struct ModelStatusBadge: View {
                 .accessibilityLabel("Model")
                 .accessibilityValue("\(model.installDescriptor.displayName), \(model.installDescriptor.family.rawValue)")
                 .accessibilityIdentifier(.hudStatus)
+            Text(model.installDescriptor.family.rawValue)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 

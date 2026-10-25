@@ -55,7 +55,7 @@ public func run(args: Args,
 
         let modelURL = URL(fileURLWithPath: args.model)
         let input = try parseInput(args: args)
-        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        let family = args.family
         if family != .gemma4 && input.hasImages {
             return errored(stderr, "image input is not supported for \(family.rawValue)", 2)
         }
@@ -140,14 +140,20 @@ public func run(args: Args,
         // warning that the run may swap or be killed.
         let hostMemory = ContextAdmission.hostMemoryBytes
         let admissionConfig = ArchConfig.canonical(for: family) ?? .gemma4_26B_A4B
-        if case .needsMemory = ContextAdmission.availability(
+        let availability = ContextAdmission.availability(
             config: admissionConfig,
             maxContext: args.maxContext,
-            hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots) {
-            let need = ContextAdmission.needDescription(
-                config: admissionConfig,
-                maxContext: args.maxContext,
-                hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots)
+            hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots)
+        let need = ContextAdmission.needDescription(
+            config: admissionConfig,
+            maxContext: args.maxContext,
+            hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots)
+        switch availability {
+        case .available:
+            break
+        case .exceedsModel:
+            return errored(stderr, need, 2)
+        case .needsMemory:
             stderr.write(Data("[memory: \(need) Continuing.]\n".utf8))
         }
 

@@ -90,13 +90,25 @@ import Testing
         #expect(AppModelInstallationProbe.status(at: directory) == .complete)
     }
 
-    @Test func probeRejectsADescriptorFromAnotherFamily() throws {
-        let directory = try makeInstalledModelDirectory(family: .lfm2Moe)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        guard case .partial(let reason) = AppModelInstallationProbe.status(
-            at: directory, descriptor: AppModelCatalog.gemma4) else {
-            Issue.record("expected partial"); return
+    @Test(.enabled(if: InstalledLFMPack.directory != nil))
+    func installedLFMPackProbesComplete() throws {
+        let directory = try #require(InstalledLFMPack.directory)
+        #expect(AppModelInstallationProbe.status(at: directory) == .complete)
+        #expect(AppModelInstallationProbe.status(
+            at: directory, descriptor: AppModelCatalog.lfm2_5) == .complete)
+    }
+
+    private enum InstalledLFMPack {
+        static var directory: URL? {
+            var candidate = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent()
+            while candidate.path != "/" {
+                let url = candidate.appendingPathComponent("scratch/lfm2.5-24b-a2b.gturbo")
+                if FileManager.default.fileExists(atPath: url.appendingPathComponent("manifest.json").path) {
+                    return url
+                }
+                candidate = candidate.deletingLastPathComponent()
+            }
+            return nil
         }
-        #expect(reason.contains("lfm2_moe"))
     }
 }

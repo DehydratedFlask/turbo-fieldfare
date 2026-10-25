@@ -5,7 +5,8 @@ import TurboFieldfareCLICore
 let rawArgv = Array(CommandLine.arguments.dropFirst())
 let parsedArgs: Args
 do {
-    parsedArgs = try Args.parse(rawArgv)
+    let family = try Args.peekModelFamily(rawArgv)
+    parsedArgs = try Args.parse(rawArgv, manifestFamily: family)
 } catch ArgsError.helpRequested {
     print(Args.usage)
     exit(0)

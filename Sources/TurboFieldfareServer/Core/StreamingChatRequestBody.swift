@@ -254,10 +254,14 @@ final class StreamingChatRequestBody {
             if header.hasPrefix("data:image/") {
                 guard visionCapability == "ready" else {
                     throw ServerRequestError.invalid(
-                        message: visionCapability == "disabled"
-                            ? "image support is disabled"
-                            : "image support is unavailable",
-                        param: "messages", code: "vision_unavailable")
+                        message: visionCapability == "unsupported"
+                            ? "image input is not supported for this model"
+                            : (visionCapability == "disabled"
+                                ? "image support is disabled"
+                                : "image support is unavailable"),
+                        param: "messages",
+                        code: visionCapability == "unsupported"
+                            ? "unsupported_image" : "vision_unavailable")
                 }
                 guard ServerAttachmentStore.allowedDataURLHeaders.contains(header) else {
                     throw ServerRequestError.invalid(

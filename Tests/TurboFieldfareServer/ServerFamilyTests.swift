@@ -15,6 +15,8 @@ struct ServerFamilyTests {
         #expect(args.modelID == "lfm2.5-24b-a2b")
         #expect(args.maxContext == 8_192)
         #expect(args.expertCacheSlots == 8)
+        let config = try args.resolvedRuntimeConfiguration()
+        #expect(config.prefillPolicy == .chunked)
     }
 
     @Test func gemmaArgumentsKeepTheirDefaults() throws {

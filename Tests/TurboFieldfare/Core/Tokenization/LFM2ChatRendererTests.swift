@@ -13,7 +13,7 @@ struct LFM2ChatRendererTests {
                        .init(role: .user, content: "U")],
             tools: nil, addGenerationPrompt: true)
         #expect(text == "<|startoftext|><|im_start|>system\nS<|im_end|>\n"
-            + "<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n thinking")
+            + "<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n<think>")
     }
 
     @Test func rendersToolCallsWithPythonLiterals() throws {
@@ -52,6 +52,12 @@ struct LFM2ChatRendererTests {
             tools: nil, addGenerationPrompt: false)
         #expect(!text.contains("hidden"))
         #expect(text.contains("visible"))
+    }
+
+    @Test func continuationPromptAppendsAUserTurnAfterAnAssistantLine() {
+        let text = renderer.continuationPrompt(userContent: "U")
+        #expect(text == "<|im_end|>\n<|im_start|>user\nU<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>")
     }
 
     @Test func rejectsASystemMessageThatIsNotFirst() {

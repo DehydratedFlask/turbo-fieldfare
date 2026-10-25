@@ -1,4 +1,6 @@
+import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public struct Args: Equatable, Sendable {
     public var model: String
@@ -25,6 +27,7 @@ public struct Args: Equatable, Sendable {
     /// is known, which needs the tokenizer and, for images, their geometry.
     public var prefillChunkTokensAuto: Bool
     public var rdadvisePolicy: RDAdvicePolicyMode
+    public var family: ModelFamily
 
     public init(model: String,
                 prompt: String? = nil,
@@ -47,7 +50,8 @@ public struct Args: Equatable, Sendable {
                 prefillPolicy: RuntimePrefillPolicy = RuntimeConfiguration.production.prefillPolicy,
                 prefillChunkTokens: Int = RuntimeConfiguration.production.prefillChunkTokens,
                 prefillChunkTokensAuto: Bool = false,
-                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy) {
+                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy,
+                family: ModelFamily = .gemma4) {
         self.model = model
         self.prompt = prompt
         self.chatPrompt = chatPrompt
@@ -70,6 +74,7 @@ public struct Args: Equatable, Sendable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillChunkTokensAuto = prefillChunkTokensAuto
         self.rdadvisePolicy = rdadvisePolicy
+        self.family = family
     }
 }
 
@@ -158,16 +163,15 @@ extension Args {
     public func resolvedRuntimeConfiguration(
         forceLogitsHead: Bool,
         imagePrompt: Bool = false) throws -> RuntimeConfiguration {
+        let minimumSlots = family == .lfm2Moe
+            ? 8 : RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         // Images reach the runtime two ways, `--image` and `image_file` parts
         // inside `--messages-file`, and only the first fills `images`. Asking
         // the caller keeps the second from surviving validation and dying in
         // the routed tile scheduler after the model load and every GPU encode.
-        guard !imagePrompt
-                || expertCacheSlots
-                >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill else {
+        guard !imagePrompt || expertCacheSlots >= minimumSlots else {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
-                have: expertCacheSlots,
-                need: RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
+                have: expertCacheSlots, need: minimumSlots)
         }
         guard RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots) else {
             throw ArgsError.invalidValue(
@@ -177,8 +181,7 @@ extension Args {
             throw ArgsError.invalidValue(
                 flag: "--prefill-chunk-tokens", value: "\(prefillChunkTokens)")
         }
-        let chunkedPrefillSupported = expertCacheSlots >=
-            RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
+        let chunkedPrefillSupported = expertCacheSlots >= minimumSlots
         guard prefillPolicy == .off || chunkedPrefillSupported else {
             throw ArgsError.invalidValue(
                 flag: "--expert-cache-slots",
@@ -193,7 +196,8 @@ extension Args {
             forceLogitsHead: forceLogitsHead)
     }
 
-    public static func parse(_ argv: [String]) throws -> Args {
+    public static func parse(_ argv: [String],
+                             manifestFamily: ModelFamily? = nil) throws -> Args {
         var model: String?
         var prompt: String?
         var chatPrompt: String?
@@ -394,9 +398,19 @@ extension Args {
                              prefillPolicy: prefillPolicy,
                              prefillChunkTokens: prefillChunkTokens,
                              prefillChunkTokensAuto: prefillChunkTokensAuto,
-                             rdadvisePolicy: rdadvisePolicy)
+                             rdadvisePolicy: rdadvisePolicy,
+                             family: manifestFamily ?? .gemma4)
         _ = try arguments.resolvedRuntimeConfiguration(forceLogitsHead: false)
         return arguments
+    }
+
+    /// Peek the installed manifest family before parsing so an LFM pack can use
+    /// its 8-slot default with chunked prefill.
+    public static func peekModelFamily(_ argv: [String]) throws -> ModelFamily? {
+        guard let index = argv.firstIndex(of: "--model"),
+              index + 1 < argv.count else { return nil }
+        return try ManifestReader.peekFamily(
+            directoryURL: URL(fileURLWithPath: argv[index + 1]))
     }
 
     private static func takeValue(_ argv: [String],
