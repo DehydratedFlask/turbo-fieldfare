@@ -12,8 +12,8 @@ struct ModelInstallView: View {
             VStack(spacing: 22) {
                 identity
                 modelPicker
-                ModelLocationView(model: model)
                 actions
+                ModelLocationView(model: model)
                 VStack(alignment: .leading, spacing: 8) {
                     ModelLocationNotices(model: model, showsVolumeWarning: false)
                 }
@@ -74,6 +74,26 @@ struct ModelInstallView: View {
             Text("\(model.installDescriptor.family.rawValue) · \(model.installDescriptor.defaultFilename)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if !model.isModelInstalled && !model.isInstallingModel {
+                Button(model.hasPartialModelDownload
+                       ? "Resume \(model.installDescriptor.displayName) Download"
+                       : "Download \(model.installDescriptor.displayName)") {
+                    model.installModel()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canInstallModel)
+                .accessibilityIdentifier(.installDownload)
+                if case .failed(let message) = model.installReadiness {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else if case .insufficientSpace(let requirement) = model.installReadiness {
+                    Text("\(MetricFormat.storage(requirement.shortfallBytes)) more space is required.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -204,12 +224,6 @@ struct ModelInstallView: View {
                     .keyboardShortcut(.cancelAction)
                     .disabled(!model.canCancelInstall)
                     .accessibilityIdentifier(.installCancel)
-            } else {
-                Button(model.hasPartialModelDownload ? "Resume Download" : "Download Model",
-                       action: model.installModel)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canInstallModel)
-                    .accessibilityIdentifier(.installDownload)
             }
             Button("Use Existing Model…") {
                 ModelLocationPanels.choose(model: model, intent: .existing)

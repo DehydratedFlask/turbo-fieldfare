@@ -533,7 +533,15 @@ public final class AppModel {
 
     public var canInstallModel: Bool {
         if isChangingModelLocation || isModelChoiceRequired || !isModelLocationAvailable { return false }
-        guard case .ready = installReadiness else { return false }
+        switch installReadiness {
+        case .ready, .failed:
+            // A failed probe is usually a stale/corrupt partial download or a
+            // transient disk error. Keep the start action available so the
+            // installer can report the real failure or replace the partial.
+            break
+        case .installed, .checking, .insufficientSpace:
+            return false
+        }
         return !isRunning && !loadState.isLoading && !isInstallingModel
             && !isVisionCompanionOperationInProgress
             && requiresModelInstallation

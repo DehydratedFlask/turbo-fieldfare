@@ -626,6 +626,91 @@ import Testing
         #expect(!model.isThinking)
     }
 
+    @MainActor
+    @Test func selectingAnUninstalledModelOffersItsDownload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("app-select-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(
+            appDataDirectory: root,
+            environment: ["TURBO_FIELDFARE_APP_DATA_PATH": root.path],
+            client: MockInferenceClient(),
+            settingsPersistenceEnabled: true)
+
+        #expect(model.requiresModelInstallation)
+        await model.selectModel(id: AppModelCatalog.lfm2_5.id)
+
+        #expect(model.selectedModelID == AppModelCatalog.lfm2_5.id)
+        #expect(model.installDescriptor.family == .lfm2Moe)
+        #expect(model.requiresModelInstallation)
+        guard case .ready = model.installReadiness else {
+            Issue.record("install readiness is \(model.installReadiness)"); return
+        }
+        #expect(model.canInstallModel)
+    }
+
+    @MainActor
+    @Test func switchingFromInstalledLFMToGemmaOffersGemmaDownload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("app-switch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lfm = try makeInstalledModelDirectory(family: .lfm2Moe)
+        let installedLFM = root.appendingPathComponent("lfm2.5-24b-a2b.gturbo",
+                                                      isDirectory: true)
+        try FileManager.default.moveItem(at: lfm, to: installedLFM)
+        let receiptURL = installedLFM.appendingPathComponent("verified-install.json")
+        var receipt = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: receiptURL)) as? [String: Any])
+        receipt["modelDirectoryPath"] = installedLFM.standardizedFileURL.path
+        try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            .write(to: receiptURL)
+        var settings = MacAppSettings()
+        settings.selectedModelPath = installedLFM.path
+        settings.selectedModelID = AppModelCatalog.lfm2_5.id
+        settings.expertCacheSlots = 8
+        try MacAppSettingsFileStore.save(settings, at: AppDataLocation.settingsURL(in: root))
+
+        let model = AppModel(
+            appDataDirectory: root,
+            environment: ["TURBO_FIELDFARE_APP_DATA_PATH": root.path],
+            client: MockInferenceClient(),
+            settingsPersistenceEnabled: true)
+        #expect(model.selectedModelID == AppModelCatalog.lfm2_5.id)
+        #expect(!model.requiresModelInstallation)
+
+        await model.selectModel(id: AppModelCatalog.gemma4.id)
+        #expect(model.selectedModelID == AppModelCatalog.gemma4.id)
+        #expect(model.installDescriptor.family == .gemma4)
+        #expect(model.requiresModelInstallation)
+        guard case .ready = model.installReadiness else {
+            Issue.record("install readiness is \(model.installReadiness)"); return
+        }
+        #expect(model.canInstallModel)
+    }
+
+    @MainActor
+    @Test func aFailedReadinessStillOffersAStart() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("app-failed-ready-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(
+            appDataDirectory: root,
+            environment: ["TURBO_FIELDFARE_APP_DATA_PATH": root.path],
+            client: MockInferenceClient(),
+            installer: FailingRequirementInstaller(),
+            settingsPersistenceEnabled: true)
+        guard case .failed = model.installReadiness else {
+            Issue.record("expected a failed readiness, got \(model.installReadiness)")
+            return
+        }
+        #expect(model.requiresModelInstallation)
+        #expect(model.canInstallModel)
+    }
+
     private func makeSettingsRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppModelContext-\(UUID().uuidString)",
@@ -647,4 +732,19 @@ import Testing
     private func waitForIdle(_ model: AppModel) async {
         await SendWaiting.turnEnds(model)
     }
+}
+
+private struct FailingRequirementInstaller: AppModelInstallerClient, Sendable {
+    let descriptor = AppModelInstallDescriptor.default
+
+    func checkInstallRequirement(outputDirectory: URL) throws -> AppModelInstallRequirement {
+        throw AppInferenceError.unknown("synthetic readiness failure")
+    }
+
+    func installDefaultModel(outputDirectory: URL) -> AsyncThrowingStream<AppModelInstallEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func discardPartialInstall(outputDirectory: URL) async throws {}
+    func cancel() {}
 }

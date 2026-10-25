@@ -200,6 +200,32 @@ struct TurboFieldfareMacApp: App {
                 Divider()
                 Button("Reveal Model in Finder", action: revealModel)
                     .disabled(modelRevealTarget == .unavailable)
+                Divider()
+                Button {
+                    Task { await model.selectModel(id: AppModelCatalog.gemma4.id) }
+                } label: {
+                    Text((model.selectedModelID == AppModelCatalog.gemma4.id ? "✓ " : "")
+                        + AppModelCatalog.gemma4.displayName)
+                }
+                .disabled(model.selectedModelID == AppModelCatalog.gemma4.id
+                    || model.isChangingModelLocation || model.isRunning
+                    || model.isInstallingModel || model.isTurnInFlight)
+                Button {
+                    Task { await model.selectModel(id: AppModelCatalog.lfm2_5.id) }
+                } label: {
+                    Text((model.selectedModelID == AppModelCatalog.lfm2_5.id ? "✓ " : "")
+                        + AppModelCatalog.lfm2_5.displayName)
+                }
+                .disabled(model.selectedModelID == AppModelCatalog.lfm2_5.id
+                    || model.isChangingModelLocation || model.isRunning
+                    || model.isInstallingModel || model.isTurnInFlight)
+                if model.requiresModelInstallation {
+                    Button("Download \(model.installDescriptor.displayName)") {
+                        model.installModel()
+                    }
+                    .disabled(!model.canInstallModel)
+                }
+                Divider()
                 // The Inspector shows image support only while there is
                 // something to decide, so reclaiming the pack lives here:
                 // rare, deliberate, and destructive. Which is why it asks
