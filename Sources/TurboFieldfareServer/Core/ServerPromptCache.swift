@@ -143,7 +143,7 @@ struct ServerPromptCache: Sendable {
         domain: ServerPromptCacheDomain,
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32]?,
-        tokenizer: GFTokenizer
+        tokenizer: any ModelTokenizer
     ) -> ServerPromptCacheMatch {
         guard let entry,
               entry.domain == domain,
@@ -199,17 +199,24 @@ struct ServerPromptCache: Sendable {
         }
         let continuation = Array(request.messages.dropFirst(inputCount + 1))
 
+        // The rendered-prefix fast path above is family-neutral. The bridge
+        // encoders below are Gemma-specific; an LFM miss must full-render and
+        // prefill rather than fall back to a Gemma token bridge.
+        guard let gemmaTokenizer = tokenizer as? GFTokenizer else {
+            return .miss(.unsupportedContinuation)
+        }
+
         if entry.assistantTurn.message.toolCalls.isEmpty {
             return matchTextContinuation(
                 entry: entry,
                 continuation: continuation,
-                tokenizer: tokenizer)
+                tokenizer: gemmaTokenizer)
         }
         return matchToolContinuation(
             entry: entry,
             request: request,
             continuation: continuation,
-            tokenizer: tokenizer)
+            tokenizer: gemmaTokenizer)
     }
 
     private func assistantMatches(

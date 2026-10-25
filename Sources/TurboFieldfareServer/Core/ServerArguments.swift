@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
@@ -15,6 +16,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let rdadvisePolicy: RDAdvicePolicyMode
     public let visionPack: String?
     public let visionResidency: VisionResidencyPolicy
+    public let family: ModelFamily
 
     public static let allowedMaxContext = [
         4_096, 8_192, 16_384, 32_768, 65_536, 98_304, 131_072, 196_608, 262_144,
@@ -29,15 +31,17 @@ public struct ServerArguments: Equatable, Sendable {
       --vision-residency <on-demand|keep-ready>
                                  Routed-expert residency during vision (default on-demand).
       --port <1...65535>         Loopback port (default 8080).
-      --model-id <id>            API model identifier (default gemma-4-26b-a4b-it).
+      --model-id <id>            API model identifier (default gemma-4-26b-a4b-it;
+                                 lfm2.5-24b-a2b for an LFM pack).
       --max-context <tokens>     4096, 8192, 16384, 32768, 65536, 98304,
-                                 131072, 196608, or 262144 (default 16384).
+                                 131072, 196608, or 262144 (default 16384; 8192 for an LFM pack).
                                  Contexts exceeding the host memory budget are refused.
                                  TURBO_FIELDFARE_ALLOW_UNBACKED_CONTEXT=1 overrides this.
       --queue-limit <count>      Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                                  Prompt KV reuse mode (default single-prefix).
       --expert-cache-slots <n>   Expert-cache slots: \(RuntimeConfiguration.allowedValueList(RuntimeConfiguration.allowedExpertCacheSlots)) (default 16).
+                                 An LFM pack defaults to 8 slots.
       --expert-cache-policy <s>  Expert-cache policy: lfu or lru (default lfu).
       --prefill on|off           Enable or disable chunked prompt prefill (default on).
                                  Chunked prefill requires 16 or more cache slots.
@@ -91,7 +95,8 @@ public struct ServerArguments: Equatable, Sendable {
     public static func parse(
         _ input: [String],
         hostMemoryBytes: UInt64 = ContextAdmission.hostMemoryBytes,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        manifestFamily: ModelFamily? = nil
     ) throws -> ServerArguments {
         var model: String?
         var port = 8080
@@ -106,6 +111,9 @@ public struct ServerArguments: Equatable, Sendable {
         var prefillPolicy = RuntimePrefillPolicy.chunked
         var prefillChunkTokens = 128
         var rdadvisePolicy = RDAdvicePolicyMode.off
+        var modelIDExplicit = false
+        var maxContextExplicit = false
+        var expertCacheSlotsExplicit = false
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -128,12 +136,14 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--model-id must not be empty")
                 }
                 modelID = value
+                modelIDExplicit = true
             case "--max-context":
                 guard let parsed = Int(value),
                       allowedMaxContext.contains(parsed) else {
                     throw ServerArgumentError.invalid("--max-context is not supported")
                 }
                 maxContext = parsed
+                maxContextExplicit = true
             case "--queue-limit":
                 guard let parsed = Int(value), parsed > 0 else {
                     throw ServerArgumentError.invalid("--queue-limit must be positive")
@@ -161,6 +171,7 @@ public struct ServerArguments: Equatable, Sendable {
                         allowed: RuntimeConfiguration.allowedExpertCacheSlots)
                 }
                 expertCacheSlots = parsed
+                expertCacheSlotsExplicit = true
             case "--expert-cache-policy":
                 guard let parsed = RuntimeExpertCachePolicy(rawValue: value) else {
                     throw ServerArgumentError.invalid("--expert-cache-policy must be lfu or lru")
@@ -205,11 +216,25 @@ public struct ServerArguments: Equatable, Sendable {
             }
         }
         guard let model else { throw ServerArgumentError.invalid("--model is required") }
+        let family = manifestFamily ?? .gemma4
+        if !modelIDExplicit {
+            modelID = family == .lfm2Moe ? "lfm2.5-24b-a2b" : "gemma-4-26b-a4b-it"
+        }
+        if !maxContextExplicit {
+            maxContext = family == .lfm2Moe ? 8_192 : 16_384
+        }
+        if !expertCacheSlotsExplicit {
+            expertCacheSlots = family == .lfm2Moe ? 8 : 16
+        }
+        if family != .gemma4, visionPack != nil {
+            throw ServerArgumentError.invalid(
+                "--vision-pack is not supported for \(family.rawValue)")
+        }
         // Refused here rather than at load: the KV allocation for a context the
         // host cannot back fails deep inside the runtime, after the model has
         // already started loading, with an allocator error that says nothing
         // about how much memory the choice actually needs.
-        let config = ArchConfig.gemma4_26B_A4B
+        let config = ArchConfig.canonical(for: family) ?? .gemma4_26B_A4B
         if case .needsMemory = ContextAdmission.availability(config: config,
                                                              maxContext: maxContext,
                                                              hostMemoryBytes: hostMemoryBytes, expertCacheSlots: expertCacheSlots),
@@ -232,7 +257,19 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunkTokens: prefillChunkTokens,
                                rdadvisePolicy: rdadvisePolicy,
                                visionPack: visionPack,
-                               visionResidency: visionResidency)
+                               visionResidency: visionResidency,
+                               family: family)
+    }
+
+    /// Peek the installed manifest's family before parsing, so family defaults
+    /// are applied only when the operator did not override them.
+    public static func peekModelFamily(_ input: [String]) throws -> ModelFamily? {
+        guard let index = input.firstIndex(of: "--model"),
+              index + 1 < input.count else {
+            return nil
+        }
+        return try ManifestReader.peekFamily(
+            directoryURL: URL(fileURLWithPath: input[index + 1]))
     }
 }
 

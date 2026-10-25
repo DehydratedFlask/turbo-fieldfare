@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
@@ -511,8 +512,9 @@ enum ServerRequestImages {
 public actor ServerModelSession: ServerInferenceBackend {
     private let context: MetalContext
     private let model: Model
-    private let tokenizer: GFTokenizer
-    private let runner: RealForwardRunner
+    private let tokenizer: any ModelTokenizer
+    private let runner: any TextRunner
+    private let family: ModelFamily
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
     private let maxContext: Int
@@ -554,31 +556,44 @@ public actor ServerModelSession: ServerInferenceBackend {
                             visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
                             runtimeConfiguration: RuntimeConfiguration) async throws -> ServerModelSession {
-        let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
-        guard let tokenizerFolder else {
-            throw GFTokenizerError.missingToolTemplate
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        if family == .gemma4 {
+            let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
+            guard let tokenizerFolder else {
+                throw GFTokenizerError.missingToolTemplate
+            }
+            let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
+            guard FileManager.default.fileExists(atPath: templateURL.path) else {
+                throw GFTokenizerError.missingToolTemplate
+            }
         }
-        let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
-        guard FileManager.default.fileExists(atPath: templateURL.path) else {
-            throw GFTokenizerError.missingToolTemplate
-        }
-        let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
+        let tokenizer = try await TokenizerFactory.load(
+            family: family, forModelDirectory: modelDirectory)
         let context = try MetalContext()
         let runtime = runtimeConfiguration
-        let model = try Model.load(
+        let model = try Model.loadResolvingFamily(
             directoryURL: modelDirectory,
             device: context.device,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(model: model,
-                                           context: context,
-                                           maxContext: maxContext,
-                                           runtimeConfiguration: runtime)
+        let runner = try RunnerFactory.make(model: model,
+                                            context: context,
+                                            maxContext: maxContext,
+                                            runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize)
-        let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let templateDigest: String
+        if family == .gemma4,
+           let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory) {
+            let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
+            templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
+                .map { String(format: "%02x", $0) }
+                .joined()
+        } else {
+            templateDigest = SHA256.hash(data: Data(tokenizer.chatTemplateIdentity.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+        }
         let runtimeIdentity = Self.runtimeIdentityString(runtime: runtime)
         let runtimeDigest = SHA256.hash(data: Data(runtimeIdentity.utf8))
             .map { String(format: "%02x", $0) }
@@ -593,49 +608,55 @@ public actor ServerModelSession: ServerInferenceBackend {
             templateSHA256: templateDigest)
         let visionRuntime: VisionRuntime?
         let visionCapability: String
-        // An explicit pack path is an operator's statement that the pack is
-        // there; a typo must fail loudly at startup, not serve text with vision
-        // silently missing.
-        if let visionPackURL,
-           !FileManager.default.fileExists(atPath: visionPackURL.path) {
-            throw VisionPackError.packNotFound(visionPackURL.path)
-        }
-        // A model directory without the .gturbo suffix has no companion
-        // location; that only means vision is missing, never that a
-        // text-serving load must fail.
-        let resolvedVisionPackURL = visionPackURL
-            ?? (try? VisionPackLocation.companionURL(forTextModel: modelDirectory))
-        if let hardwareCapability = Self.hardwareVisionCapability(
-            supportsVisionRuntime: VisionRuntime.isSupported(on: context.device)) {
+        if family != .gemma4 {
             visionRuntime = nil
-            visionCapability = hardwareCapability
-            ServerLog.visionRuntimeUnsupported()
-        } else if let resolvedVisionPackURL,
-           FileManager.default.fileExists(atPath: resolvedVisionPackURL.path) {
-            do {
-                visionRuntime = try VisionRuntime.open(
-                    textModelURL: modelDirectory,
-                    context: context,
-                    visionPackURL: resolvedVisionPackURL)
-                visionCapability = "ready"
-            } catch {
-                visionRuntime = nil
-                visionCapability = Self.unavailableVisionCapability(for: error)
-                if visionCapability == "unsupported" {
-                    ServerLog.visionRuntimeUnsupported(
-                        at: resolvedVisionPackURL, error: error)
-                } else {
-                    ServerLog.visionPackInvalid(at: resolvedVisionPackURL, error: error)
-                }
-            }
+            visionCapability = "unsupported"
         } else {
-            visionRuntime = nil
-            visionCapability = "missing"
+            // An explicit pack path is an operator's statement that the pack is
+            // there; a typo must fail loudly at startup, not serve text with
+            // vision silently missing.
+            if let visionPackURL,
+               !FileManager.default.fileExists(atPath: visionPackURL.path) {
+                throw VisionPackError.packNotFound(visionPackURL.path)
+            }
+            // A model directory without the .gturbo suffix has no companion
+            // location; that only means vision is missing, never that a
+            // text-serving load must fail.
+            let resolvedVisionPackURL = visionPackURL
+                ?? (try? VisionPackLocation.companionURL(forTextModel: modelDirectory))
+            if let hardwareCapability = Self.hardwareVisionCapability(
+                supportsVisionRuntime: VisionRuntime.isSupported(on: context.device)) {
+                visionRuntime = nil
+                visionCapability = hardwareCapability
+                ServerLog.visionRuntimeUnsupported()
+            } else if let resolvedVisionPackURL,
+               FileManager.default.fileExists(atPath: resolvedVisionPackURL.path) {
+                do {
+                    visionRuntime = try VisionRuntime.open(
+                        textModelURL: modelDirectory,
+                        context: context,
+                        visionPackURL: resolvedVisionPackURL)
+                    visionCapability = "ready"
+                } catch {
+                    visionRuntime = nil
+                    visionCapability = Self.unavailableVisionCapability(for: error)
+                    if visionCapability == "unsupported" {
+                        ServerLog.visionRuntimeUnsupported(
+                            at: resolvedVisionPackURL, error: error)
+                    } else {
+                        ServerLog.visionPackInvalid(at: resolvedVisionPackURL, error: error)
+                    }
+                }
+            } else {
+                visionRuntime = nil
+                visionCapability = "missing"
+            }
         }
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
                                   runner: runner,
+                                  family: family,
                                   scratch: scratch,
                                   prefillConfig: runtime.prefillConfig,
                                   maxContext: maxContext,
@@ -662,10 +683,22 @@ public actor ServerModelSession: ServerInferenceBackend {
         return "invalid"
     }
 
+    /// LFM has no vision tower. Refuse image content before planning, encoding,
+    /// or prefill so a request never reaches the model with the image silently
+    /// dropped.
+    static func imageRejection(family: ModelFamily,
+                               hasImages: Bool) -> ServerRequestError? {
+        guard hasImages, family != .gemma4 else { return nil }
+        return .invalid(
+            message: "image input is not supported for \(family.rawValue)",
+            param: "messages", code: "unsupported_image")
+    }
+
     private init(context: MetalContext,
                  model: Model,
-                 tokenizer: GFTokenizer,
-                 runner: RealForwardRunner,
+                 tokenizer: any ModelTokenizer,
+                 runner: any TextRunner,
+                 family: ModelFamily,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
@@ -678,6 +711,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.runner = runner
+        self.family = family
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.maxContext = maxContext
@@ -697,6 +731,10 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     public func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
+        if let rejection = Self.imageRejection(
+            family: family, hasImages: !request.imageFiles.isEmpty) {
+            throw rejection
+        }
         if !request.imageFiles.isEmpty {
             let softTokens = try imageSoftTokenCounts(request)
             try validateImageTokenBudget(request, softTokens: softTokens)
@@ -779,7 +817,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         request: ValidatedChatRequest,
         cachedMessageCount: Int
     ) async throws -> MultimodalPrefillInput {
-        guard let messages = request.multimodalMessages, let visionRuntime,
+        guard let gemmaTokenizer = tokenizer as? GFTokenizer,
+              let messages = request.multimodalMessages, let visionRuntime,
               messages.count == cachedMessageCount + 2,
               let turn = messages.last, turn.role == .user,
               turn.toolCalls.isEmpty, turn.toolCallID == nil else {
@@ -803,7 +842,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             for: urls,
             with: imagePreprocessor(visionRuntime),
             checkCancellation: { try Task.checkCancellation() })
-        let bridge = try tokenizer.encodeMultimodalUserContinuation(
+        let bridge = try gemmaTokenizer.encodeMultimodalUserContinuation(
             textAndImages: parts, imageTokenCounts: images.map(\.softTokenCount))
         var spans: [MultimodalImageSpan] = []
         for (range, image) in zip(bridge.imageTokenRanges, images) {
@@ -830,6 +869,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                 message: "image support is unavailable",
                 param: "messages", code: "vision_unavailable")
         }
+        guard let gemmaTokenizer = tokenizer as? GFTokenizer else {
+            throw ServerRequestError.invalid(
+                message: "image input is not supported for \(family.rawValue)",
+                param: "messages", code: "unsupported_image")
+        }
         do {
             var features: [UUID: VisionFeatures] = [:]
             // Scoped, so the plans — up to `maximumOpenPlans` live ImageIO
@@ -855,7 +899,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             return try MultimodalPromptRenderer.render(
                 messages: messages,
                 featuresByID: features,
-                tokenizer: tokenizer,
+                tokenizer: gemmaTokenizer,
                 tools: request.tools)
         } catch let error as MultimodalPromptRendererError {
             throw Self.clientError(for: error) ?? error
@@ -891,6 +935,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         let request = prepared.request
+        if let rejection = Self.imageRejection(
+            family: family, hasImages: !request.imageFiles.isEmpty) {
+            throw rejection
+        }
         var completionStarted = false
         var completed = false
         defer {
@@ -988,9 +1036,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
-            ? StructuredAssistantDecoder(
-                tokenizer: tokenizer,
+        let decoder = (needsToolTemplate || family == .lfm2Moe)
+            ? tokenizer.makeAssistantDecoder(
                 allowedTools: Set(request.tools.map(\.name)))
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
@@ -1027,9 +1074,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                 calls.append(call)
                                 onEvent(.toolCall(call))
                             case .reasoning:
-                                // Reasoning-state wiring lands with the
-                                // family-neutral server pass; this task only
-                                // introduces the event.
+                                // Reasoning text is not exposed in v1; the
+                                // event exists so the app can show a state.
                                 break
                             }
                         }
@@ -1139,13 +1185,19 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private func renderPrompt(_ request: ValidatedChatRequest) throws -> [Int32] {
         let promptIDs: [Int32]
-        if usesToolTemplate(request) {
-            promptIDs = try tokenizer.encodeToolChat(
+        if family == .gemma4,
+           usesToolTemplate(request),
+           let gemmaTokenizer = tokenizer as? GFTokenizer {
+            // Gemma's tool renderer is also what replays a historical tool
+            // conversation when the client did not resend the tool list.
+            promptIDs = try gemmaTokenizer.encodeToolChat(
                 messages: request.messages,
                 tools: request.tools)
         } else {
-            let rendered = try tokenizer.applyChatTemplate(request.messages)
-            promptIDs = tokenizer.encode(rendered, addBOS: false)
+            promptIDs = try tokenizer.applyChatTemplate(
+                messages: request.messages,
+                tools: request.tools,
+                addGenerationPrompt: true)
         }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(

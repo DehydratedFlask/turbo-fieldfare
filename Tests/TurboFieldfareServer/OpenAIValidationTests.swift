@@ -15,6 +15,39 @@ struct OpenAIValidationTests {
         #expect(validated.maximumCompletionTokens == 4096)
     }
 
+    @Test func lfmToolSchemaPassesThroughUnchanged() throws {
+        let schema: JSONValue = .object([
+            "type": .string("object"),
+            "properties": .object([
+                "city": .object(["type": .string("string")]),
+            ]),
+            "required": .array([.string("city")]),
+        ])
+        let schemaJSON = #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#
+        let data = Data(#"""
+        {"model":"lfm2.5-24b-a2b","messages":[{"role":"user","content":"hi"}],
+         "tools":[{"type":"function","function":{"name":"weather","description":"w",
+                   "parameters":\#(schemaJSON)}}]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "lfm2.5-24b-a2b", family: .lfm2Moe)
+        #expect(validated.tools.count == 1)
+        #expect(validated.tools[0].parameters == schema)
+    }
+
+    @Test func gemmaToolSchemaIsStillAdapted() throws {
+        let data = Data(#"""
+        {"model":"gemma-4-26b-a4b-it","messages":[{"role":"user","content":"hi"}],
+         "tools":[{"type":"function","function":{"name":"weather","description":"w",
+                   "parameters":{"type":"object","properties":{"city":{"type":["string","null"]}}}}}]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "gemma-4-26b-a4b-it", family: .gemma4)
+        #expect(validated.tools[0].parameters != request.tools![0].function.parameters)
+    }
+
     @Test func capturedOpenCodeToolResultValidates() throws {
         let request = try fixture("opencode-1.15.11-tool-result.json")
         let validated = try OpenAIRequestValidator.validate(
@@ -1264,7 +1297,8 @@ struct ServerArgumentTests {
                                         prefillChunkTokens: 128,
                                         rdadvisePolicy: .off,
                                         visionPack: nil,
-                                        visionResidency: .onDemand),
+                                        visionResidency: .onDemand,
+                                        family: .gemma4),
              allowed: RuntimeConfiguration.allowedExpertCacheSlots,
              namesAuto: false),
             (flag: "--prefill-chunk-tokens",
@@ -1280,7 +1314,8 @@ struct ServerArgumentTests {
                                         prefillChunkTokens: 512,
                                         rdadvisePolicy: .off,
                                         visionPack: nil,
-                                        visionResidency: .onDemand),
+                                        visionResidency: .onDemand,
+                                        family: .gemma4),
              allowed: RuntimeConfiguration.allowedPrefillChunkTokens,
              namesAuto: true),
         ]

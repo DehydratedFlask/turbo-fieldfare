@@ -4,6 +4,7 @@ import NIOHTTP1
 import NIOPosix
 import Synchronization
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public actor TurboFieldfareHTTPServer {
     public static let maximumBodyBytes = StreamingChatRequestBody.maximumWireBytes
@@ -23,6 +24,7 @@ public actor TurboFieldfareHTTPServer {
     private let visionCapability: String
     private let attachmentRoot: URL
     private let idleTimeout: TimeAmount
+    private let family: ModelFamily
     private let childChannels = ChildChannelRegistry()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
@@ -34,6 +36,7 @@ public actor TurboFieldfareHTTPServer {
                 visionCapability: String = "missing",
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
+                family: ModelFamily = .gemma4,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
@@ -43,6 +46,7 @@ public actor TurboFieldfareHTTPServer {
         self.visionCapability = visionCapability
         self.attachmentRoot = attachmentRoot
         self.idleTimeout = idleTimeout
+        self.family = family
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
@@ -55,6 +59,7 @@ public actor TurboFieldfareHTTPServer {
         let visionCapability = self.visionCapability
         let attachmentRoot = self.attachmentRoot
         let idleTimeout = self.idleTimeout
+        let family = self.family
         let bootstrap = ServerBootstrap(group: group)
             // The listen queue is sized to the connection cap so a burst of
             // connects up to the cap waits for the accept loop instead of
@@ -79,6 +84,7 @@ public actor TurboFieldfareHTTPServer {
                         heartbeatInterval: heartbeatInterval,
                         visionCapability: visionCapability,
                         attachmentRoot: attachmentRoot,
+                        family: family,
                         childChannels: childChannels))
                 }
             }
@@ -150,6 +156,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let childChannels: ChildChannelRegistry
     private let visionCapability: String
     private let attachmentRoot: URL
+    private let family: ModelFamily
     private var bodyParser: StreamingChatRequestBody?
     private var bodyError: (any Error)?
     private var receivedBodyBytes = 0
@@ -169,6 +176,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          heartbeatInterval: TimeAmount,
          visionCapability: String,
          attachmentRoot: URL,
+         family: ModelFamily,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
         self.backend = backend
@@ -176,6 +184,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.heartbeatInterval = heartbeatInterval
         self.visionCapability = visionCapability
         self.attachmentRoot = attachmentRoot
+        self.family = family
         self.childChannels = childChannels
     }
 
@@ -339,7 +348,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 decoded,
                 modelID: modelID,
                 preStagedImages: body.stagedImages,
-                attachmentLease: body.lease)
+                attachmentLease: body.lease,
+                family: family)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)

@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public struct OpenAIErrorEnvelope: Codable, Equatable, Sendable {
     public struct Detail: Codable, Equatable, Sendable {
@@ -503,18 +504,21 @@ private enum OpenAIToolName {
 
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
-                                modelID: String) throws -> ValidatedChatRequest {
+                                modelID: String,
+                                family: ModelFamily = .gemma4) throws -> ValidatedChatRequest {
         try validate(
             request,
             modelID: modelID,
             preStagedImages: [:],
-            attachmentLease: nil)
+            attachmentLease: nil,
+            family: family)
     }
 
     static func validate(_ request: OpenAIChatRequest,
                          modelID: String,
                          preStagedImages: [String: ServerStagedImage],
-                         attachmentLease: ServerAttachmentLease?) throws -> ValidatedChatRequest {
+                         attachmentLease: ServerAttachmentLease?,
+                         family: ModelFamily = .gemma4) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
@@ -601,7 +605,9 @@ public enum OpenAIRequestValidator {
                           "tool_choice", "unsupported_value")
         }
 
-        let tools = try (includeTools ? request.tools ?? [] : []).map(validateTool)
+        let tools = try (includeTools ? request.tools ?? [] : []).map {
+            try validateTool($0, family: family)
+        }
         let validatedMessages = try validateMessages(
             request.messages,
             preStagedImages: preStagedImages,
@@ -625,7 +631,8 @@ public enum OpenAIRequestValidator {
                                     attachmentLeases: validatedMessages.leases)
     }
 
-    private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {
+    private static func validateTool(_ tool: OpenAITool,
+                                     family: ModelFamily) throws -> GFTokenizer.FunctionDefinition {
         guard tool.type == "function" else {
             throw invalid("only function tools are supported", "tools", "unsupported_tool")
         }
@@ -639,8 +646,15 @@ public enum OpenAIRequestValidator {
                           "tools", "invalid_tool_schema")
         }
         try validateSchemaKeys(tool.function.parameters)
-        let parameters = try GemmaToolSchema.adapted(
-            tool.function.parameters, toolName: name)
+        let parameters: JSONValue
+        switch family {
+        case .gemma4:
+            parameters = try GemmaToolSchema.adapted(
+                tool.function.parameters, toolName: name)
+        case .lfm2Moe:
+            parameters = try LFMToolSchema.validated(
+                tool.function.parameters, toolName: name)
+        }
         do {
             guard (try? parameters.jinjaSendableValue()) != nil else {
                 throw invalid("tool schema contains a number that cannot be represented exactly",

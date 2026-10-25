@@ -13,7 +13,9 @@ setvbuf(stdout, nil, _IOLBF, 0)
 let arguments: ServerArguments
 let runtimeConfiguration: RuntimeConfiguration
 do {
-    arguments = try ServerArguments.parse(Array(CommandLine.arguments.dropFirst()))
+    let raw = Array(CommandLine.arguments.dropFirst())
+    let manifestFamily = try ServerArguments.peekModelFamily(raw)
+    arguments = try ServerArguments.parse(raw, manifestFamily: manifestFamily)
     // Resolved here so an unusable flag combination exits with usage instead of
     // failing after the model has started loading.
     runtimeConfiguration = try arguments.resolvedRuntimeConfiguration()
@@ -41,9 +43,10 @@ do {
         modelID: arguments.modelID,
         queueLimit: arguments.queueLimit,
         backend: backend,
-        visionCapability: backend.visionCapability)
+        visionCapability: backend.visionCapability,
+        family: arguments.family)
     _ = try await server.start(port: arguments.port)
-    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(arguments.modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue) vision=\(backend.visionCapability) vision_residency=\(arguments.visionResidency.rawValue)")
+    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(arguments.modelID) family=\(arguments.family.rawValue) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue) vision=\(backend.visionCapability) vision_residency=\(arguments.visionResidency.rawValue)")
 
     _ = await signals.wait()
     try await server.shutdown()
