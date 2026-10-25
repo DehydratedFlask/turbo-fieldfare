@@ -1,6 +1,7 @@
 import Darwin
 import Synchronization
 import TurboFieldfare
+import TurboFieldfareFormat
 import Foundation
 import TurboFieldfareAppCore
 import TurboFieldfareDecodeProtocol
@@ -106,11 +107,22 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 }
                 do {
                     let options = try appRuntimeOptions(request.runtimeOptions)
+                    let family: ModelFamily
+                    do {
+                        family = try ManifestReader.peekFamily(directoryURL: directory)
+                    } catch {
+                        try? write(DecodeServiceEvent(
+                            kind: .failed, generationID: request.requestID,
+                            error: "\(error)"), to: handles.output)
+                        break
+                    }
+                    let config = ArchConfig.canonical(for: family) ?? .gemma4_26B_A4B
                     if let refusal = DecodeLoadAdmission.refusal(
                         maxContextTokens: request.maxContextTokens,
                         hostMemoryBytes: ContextAdmission.hostMemoryBytes,
                         environment: ProcessInfo.processInfo.environment,
-                        expertCacheSlots: options.expertCacheSlots) {
+                        expertCacheSlots: options.expertCacheSlots,
+                        config: config) {
                         try? write(DecodeServiceEvent(
                             kind: .failed, generationID: request.requestID, error: refusal),
                             to: handles.output)

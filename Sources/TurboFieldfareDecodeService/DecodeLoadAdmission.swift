@@ -18,8 +18,9 @@ enum DecodeLoadAdmission {
     /// The message to answer the load with, or nil to proceed.
     static func refusal(maxContextTokens: Int,
                         hostMemoryBytes: UInt64,
-                        environment: [String: String], expertCacheSlots: Int = 16) -> String? {
-        let config = ArchConfig.gemma4_26B_A4B
+                        environment: [String: String],
+                        expertCacheSlots: Int = 16,
+                        config: ArchConfig = .gemma4_26B_A4B) -> String? {
         // The ceiling is the checkpoint's, not the host's, so no override
         // reaches it: memory cannot make a position the model was never
         // trained to address valid.

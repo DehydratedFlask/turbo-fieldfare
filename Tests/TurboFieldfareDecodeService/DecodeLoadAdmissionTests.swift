@@ -80,4 +80,30 @@ import TurboFieldfare
                                             hostMemoryBytes: twentyFourGigabyteHost,
                                             environment: [:]) == nil)
     }
+
+    @Test func lfmAdmissionUsesLFMMaxPositionsAndGeometry() {
+        let lfm = ArchConfig.lfm2_5_24B_A2B
+        #expect(DecodeLoadAdmission.refusal(
+            maxContextTokens: 131_072,
+            hostMemoryBytes: 64 << 30,
+            environment: [:],
+            expertCacheSlots: 8,
+            config: lfm) == nil)
+        #expect(DecodeLoadAdmission.refusal(
+            maxContextTokens: 262_144,
+            hostMemoryBytes: 64 << 30,
+            environment: [:],
+            expertCacheSlots: 8,
+            config: lfm) != nil)
+    }
+
+    @Test func gemmaAdmissionIsUnchanged() {
+        let gemma = ArchConfig.gemma4_26B_A4B
+        #expect(DecodeLoadAdmission.refusal(
+            maxContextTokens: 262_144,
+            hostMemoryBytes: 64 << 30,
+            environment: [:],
+            expertCacheSlots: 16,
+            config: gemma) == nil)
+    }
 }
