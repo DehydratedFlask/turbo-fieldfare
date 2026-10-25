@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import TurboFieldfare
+import TurboFieldfareFormat
 
 /// One row of the `--messages-file` JSON.
 private struct MessageJSON: Decodable {
@@ -54,6 +55,13 @@ public func run(args: Args,
 
         let modelURL = URL(fileURLWithPath: args.model)
         let input = try parseInput(args: args)
+        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        if family != .gemma4 && input.hasImages {
+            return errored(stderr, "image input is not supported for \(family.rawValue)", 2)
+        }
+        if family != .gemma4 && args.visionPack != nil {
+            return errored(stderr, "vision packs are not supported for \(family.rawValue)", 2)
+        }
         var selectedDevice: MTLDevice?
         if input.hasImages {
             guard let device = MetalContext.makeSystemDefaultDevice() else {
@@ -62,7 +70,8 @@ public func run(args: Args,
             try VisionRuntime.requireSupportedDevice(device)
             selectedDevice = device
         }
-        let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
+        let tokenizer = try await TokenizerFactory.load(
+            family: family, forModelDirectory: modelURL)
         var promptIds: [Int32]
         var multimodalMessages: [MultimodalMessage]?
         var imageURLs: [UUID: URL] = [:]
@@ -72,8 +81,8 @@ public func run(args: Args,
             promptIds = tokenizer.encode(text, addBOS: true)
         case .messages(let messages):
             multimodalMessages = nil
-            promptIds = tokenizer.encode(
-                try tokenizer.applyChatTemplate(messages), addBOS: false)
+            promptIds = try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, addGenerationPrompt: true)
         case .multimodal(let messages, let images):
             multimodalMessages = messages
             imageURLs = images
@@ -130,12 +139,13 @@ public func run(args: Args,
         // Not gated on --quiet, which suppresses the timing footer, not a
         // warning that the run may swap or be killed.
         let hostMemory = ContextAdmission.hostMemoryBytes
+        let admissionConfig = ArchConfig.canonical(for: family) ?? .gemma4_26B_A4B
         if case .needsMemory = ContextAdmission.availability(
-            config: ArchConfig.gemma4_26B_A4B,
+            config: admissionConfig,
             maxContext: args.maxContext,
             hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots) {
             let need = ContextAdmission.needDescription(
-                config: ArchConfig.gemma4_26B_A4B,
+                config: admissionConfig,
                 maxContext: args.maxContext,
                 hostMemoryBytes: hostMemory, expertCacheSlots: runtime.expertCacheSlots)
             stderr.write(Data("[memory: \(need) Continuing.]\n".utf8))
@@ -191,13 +201,13 @@ public func run(args: Args,
         }
 
         let context = try MetalContext()
-        let model = try Model.load(
+        let model = try Model.loadResolvingFamily(
             directoryURL: modelURL,
             device: context.device,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(
+        let runner = try RunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
@@ -206,6 +216,12 @@ public func run(args: Args,
                                                vocab: model.config.vocabSize)
         let multimodalInput: MultimodalPrefillInput?
         if let multimodalMessages {
+            guard let gemmaTokenizer = tokenizer as? GFTokenizer else {
+                return errored(
+                    stderr,
+                    "image input is not supported for \(family.rawValue)",
+                    2)
+            }
             let vision = try VisionRuntime.open(
                 textModelURL: modelURL,
                 context: context,
@@ -240,7 +256,7 @@ public func run(args: Args,
             let rendered = try MultimodalPromptRenderer.render(
                 messages: multimodalMessages,
                 featuresByID: features,
-                tokenizer: tokenizer)
+                tokenizer: gemmaTokenizer)
             promptIds = rendered.effectiveTokenIDs
             multimodalInput = rendered
             guard promptIds.count < args.maxContext else {
@@ -255,6 +271,45 @@ public func run(args: Args,
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = makeConfig(maxNewTokens: effectiveMaxNew)
 
+        let assistantDecoder: (any StructuredOutputDecoder)? =
+            family == .lfm2Moe
+                ? tokenizer.makeAssistantDecoder(allowedTools: [])
+                : nil
+        var decoderFailure: (any Error)?
+
+        func emit(_ events: [StructuredAssistantEvent]) {
+            for event in events {
+                guard case .content(let text) = event, !text.isEmpty else { continue }
+                stdout.write(Data(text.utf8))
+            }
+        }
+
+        func consume(id: Int32, delta: String) {
+            guard let assistantDecoder else {
+                if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+                return
+            }
+            guard decoderFailure == nil else { return }
+            do {
+                emit(try assistantDecoder.consume(tokenID: id, delta: delta))
+            } catch {
+                decoderFailure = error
+            }
+        }
+
+        func consumeTail(_ text: String) {
+            guard let assistantDecoder else {
+                stdout.write(Data(text.utf8))
+                return
+            }
+            guard decoderFailure == nil else { return }
+            do {
+                emit(try assistantDecoder.consumeTail(text))
+            } catch {
+                decoderFailure = error
+            }
+        }
+
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -263,25 +318,40 @@ public func run(args: Args,
             config: config,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            prefillConfig: runtime.prefillConfig,
+            shouldStop: { decoderFailure != nil }) { progress in
                 switch progress {
                 case .prefill:
                     break
-                case .token(_, _, let delta):
-                    if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+                case .token(_, let id, let delta):
+                    consume(id: id, delta: delta)
                 case .tail(let tail):
-                    stdout.write(Data(tail.utf8))
+                    consumeTail(tail)
                 case .reasoning:
                     // The CLI prints the visible answer only.
                     break
                 }
             }
 
+        if let decoderFailure {
+            return errored(stderr, "\(decoderFailure)", 1)
+        }
+        if let assistantDecoder {
+            do {
+                try assistantDecoder.finish()
+            } catch {
+                return errored(stderr, "\(error)", 1)
+            }
+        }
+
         if !args.quiet {
-            let tokensPerSecond = stats.decodeSeconds > 0
-                ? Double(stats.newTokens) / stats.decodeSeconds
-                : 0
-            let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+            let footer = footerLine(
+                modelID: model.modelID,
+                family: family,
+                reason: stats.reason,
+                prefillTokens: stats.prefillTokens,
+                newTokens: stats.newTokens,
+                decodeSeconds: stats.decodeSeconds)
             stderr.write(Data(footer.utf8))
         }
         return RunResult(exitCode: 0)
@@ -333,16 +403,21 @@ func orderedImageIDs(messages: [MultimodalMessage],
 /// loads the model. Being a little low only costs one extra chunk.
 func estimatedPromptTokens(
     input: PromptInput,
-    tokenizer: GFTokenizer,
+    tokenizer: any ModelTokenizer,
     device: MTLDevice
 ) throws -> Int {
     switch input {
     case .raw(let text):
         return tokenizer.encode(text, addBOS: true).count
     case .messages(let messages):
-        return tokenizer.encode(try tokenizer.applyChatTemplate(messages),
-                                addBOS: false).count
+        return try tokenizer.applyChatTemplate(
+            messages: messages, tools: nil, addGenerationPrompt: true).count
     case .multimodal(let messages, let images):
+        guard tokenizer is GFTokenizer else {
+            throw ArgsError.invalidValue(
+                flag: "--image",
+                value: "image input is not supported for \(tokenizer.family.rawValue)")
+        }
         var total = 0
         for message in messages {
             for part in message.content {
@@ -364,6 +439,21 @@ func estimatedPromptTokens(
         }
         return total
     }
+}
+
+func footerLine(modelID: String,
+                family: ModelFamily,
+                reason: StopReason,
+                prefillTokens: Int,
+                newTokens: Int,
+                decodeSeconds: Double) -> String {
+    let tokensPerSecond = decodeSeconds > 0
+        ? Double(newTokens) / decodeSeconds
+        : 0
+    return "\n[model=\(modelID) family=\(family.rawValue) "
+        + "stop=\(String(describing: reason)) prefill=\(prefillTokens)tok "
+        + "new=\(newTokens)tok decode=\(String(format: "%.2f", decodeSeconds))s "
+        + "tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
 }
 
 func prefillCoercionNotice(
