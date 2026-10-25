@@ -97,12 +97,27 @@ The Swift package exposes six products:
 | `TurboFieldfareServer` | Loopback OpenAI-compatible Chat Completions server |
 | `TurboFieldfareRepack` | Streaming model installer and install verifier |
 
+### Supported models
+
+| Model | Family | Install source | Default context | Expert-cache slots | Vision |
+| --- | --- | --- | --- | --- | --- |
+| Gemma 4 26B-A4B IT 4-bit (default) | `gemma4` | `--model-source gemma4` | 16,384 | 16 | Yes |
+| LFM2.5 24B-A2B 4-bit | `lfm2_moe` | `--model-source lfm2_moe` | 8,192 | 8 | No |
+
+Both models install as separate `.gturbo` directories and can sit side by
+side. The installed manifest's `arch.family` selects the tokenizer, runner,
+chat framing, and memory profile; a path is never guessed from its filename.
+Gemma 4 remains the default for new and existing users. See
+[LFM2.5 24B-A2B](docs/LFM2_5.md) for the architecture, tensor map, and tool
+grammar.
+
 ### Requirements
 
 - An Apple Silicon Mac; the validated target is an 8 GB M2 MacBook Air
 - macOS 26 with Metal 4
 - Apple Command Line Tools or Xcode with Swift 6.2+ and the macOS 26 SDK or newer
-- Enough free storage for the ~14.3 GB model installation
+- Enough free storage for the model installation (about 14.3 GB for Gemma 4,
+  about 13.6 GB for LFM2.5)
 - An internet connection for the first model install
 
 The package is arm64-only. Older macOS and Metal versions are not supported.
@@ -165,6 +180,9 @@ account is required.
 Choose **Download Model** to install, or **Change…** to pick a destination.
 To reuse a model, choose **Use Existing Model…** and select its `.gturbo`
 folder or parent folder. If several models are found, pick one.
+The install screen's model picker selects Gemma 4 or LFM2.5; the two install
+side by side, and switching unloads the current model and keeps each model's
+own conversation history. LFM2.5 has no image pack.
 Keep the optional image pack beside its text model: `gemma4.gturbo` and
 `gemma4.vision.gturbo`.
 
@@ -240,6 +258,26 @@ swift run -c release TurboFieldfareRepack \
 
 The runtime accepts only a completed `.gturbo` directory with a final
 `manifest.json`.
+
+Install LFM2.5 beside Gemma instead of replacing it:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --model-source lfm2_moe \
+  --output scratch/lfm2.5-24b-a2b.gturbo
+```
+
+Run it through the same CLI:
+
+```bash
+swift run -c release TurboFieldfareCLI \
+  --model scratch/lfm2.5-24b-a2b.gturbo \
+  --chat-prompt "Explain the difference between a cache and a buffer." \
+  --max-new 256
+```
+
+The footer names the manifest model ID and family. LFM has no image support;
+`--image` with an LFM model exits before loading a tokenizer or a Metal device.
 
 Verify an existing installation without loading the model:
 
@@ -380,6 +418,10 @@ TurboFieldfare currently includes:
 
 - Remote streaming repack into the `.gturbo` model format
 - Instruction-tuned Gemma 4 26B-A4B with verified chat formatting
+- LFM2.5 24B-A2B with short-convolution/full-attention layers, dense and MoE
+  blocks, 6-bit tied embedding/lm-head, and ChatML tool calls
+- Family dispatch from the installed manifest (`gemma4` or `lfm2_moe`) through
+  the tokenizer, runner, CLI, server, app, and decode service
 - 4-bit MLX affine embedding, attention, shared-expert, and routed-expert
   weights, with an 8-bit router
 - Custom Metal kernels for quantized GEMV, attention, MoE, normalization,
@@ -398,9 +440,10 @@ TurboFieldfare currently includes:
   the sliding-window layers, and routed experts are released while the tower
   runs
 
-Current scope is text input from the pinned Gemma 4 26B-A4B instruction
-checkpoint on Apple Silicon Macs with at least 8 GB of RAM, plus image input
-on M2 or newer Macs. Audio and video are out of scope.
+Current scope is text input from the pinned Gemma 4 26B-A4B and LFM2.5
+24B-A2B checkpoints on Apple Silicon Macs with at least 8 GB of RAM, plus
+image input for Gemma 4 on M2 or newer Macs. LFM has no vision tower, so image
+input is refused for an LFM model. Audio and video are out of scope.
 
 ### Future work
 

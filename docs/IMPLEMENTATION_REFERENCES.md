@@ -33,6 +33,22 @@ included for broader design context rather than a line-level claim.
   is the direct tokenizer dependency. TurboFieldfare adds bounded streaming
   detokenization around it.
 
+## LFM2.5 references
+
+- The pinned checkpoint,
+  [`LiquidAI/LFM2.5-24B-A2B-MLX-4bit`](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit),
+  at revision `667408d494bde191c2cb9dd4f4549827816b9275`.
+- Its `config.json`, `tokenizer.json`, `chat_template.jinja`, and
+  `generation_config.json`; the repacker verifies the source index
+  `7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a`.
+- MLX affine quantization, including the least-significant-bits-first 6-bit
+  packing used by the tied embedding and lm-head.
+- The `lfm2_moe` reference implementation: short depthwise convolution with a
+  two-row `Bx` state, interleaved full attention, dense layers 0–1, SiLU
+  SwiGLU, sigmoid + expert-bias top-4 routing, and standard RMSNorm.
+- The LFM ChatML tool-call grammar: Python-style literal arguments inside
+  `<|tool_call_start|>...<|tool_call_end|>`.
+
 ## Metal and kernels
 
 - Pinned [MLX Metal kernels](https://github.com/ml-explore/mlx/tree/4367c73b60541ddd5a266ce4644fd93d20223b6e/mlx/backend/metal/kernels)

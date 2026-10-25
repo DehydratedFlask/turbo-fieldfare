@@ -14,6 +14,26 @@ The frozen prompts are in
 Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 `64`, Top-P `0.95`, a 4,096-token context, and up to 1,024 generated tokens.
 
+## Model choice
+
+The guide's commands use Gemma 4, the default. To benchmark LFM2.5 instead,
+install and run it with:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --model-source lfm2_moe \
+  --output scratch/lfm2.5-24b-a2b.gturbo
+
+swift run -c release TurboFieldfareCLI \
+  --model scratch/lfm2.5-24b-a2b.gturbo \
+  --prompt "The capital of France is" \
+  --max-new 128
+```
+
+No LFM2.5 performance claim is made here. Report the measured number you get,
+with the hardware, context, and expert-cache slots; it is a measurement, not a
+ceiling.
+
 ## Prepare the Mac
 
 Install the model with the [README instructions](../README.md#command-line-interface),

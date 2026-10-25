@@ -33,6 +33,13 @@ model, so an unsupported combination fails immediately with the usage text.
 | Control | Mac values | CLI and server flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
 | Expert-cache slots | 8, 16, 24, 32 | `--expert-cache-slots` | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. Chunked prefill requires at least 16 slots. |
+
+The defaults above are Gemma 4's. An LFM2.5 pack defaults to an 8,192-token
+context and 8 expert-cache slots; explicit flags still win. The app offers
+context rows from the active family's cache geometry and hides LFM choices the
+host cannot back. LFM's 128-token conversation rewind limit is internal to the
+short-convolution state and is not a user control. LFM has no image controls;
+its Image Support section is hidden.
 | Expert-cache policy | LFU | `--expert-cache-policy lfu\|lru` | LFU | Chooses which expert is evicted when the cache is full. |
 | Prompt prefill | On, off | `--prefill on\|off` | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | Prefill chunk size | 128 | `--prefill-chunk-tokens 32\|64\|128\|256\|auto` | 128 | Sets the number of prompt tokens processed by each chunked-prefill step, and has no effect while prefill is off. Chunks loop outside layers, so each one re-reads that layer's routed experts: fewer, larger chunks read less. `auto` picks the smallest size that covers the prompt. On the server `auto` is the cap, 256: a per-request size is the smallest allowed size covering the span, so the cap prefills every prompt in exactly those spans, and the KV ring is sized from the cap either way. Only the prefill scratch is sized from the chunk, at about 125.5 KB per token over a fixed 328 KB, so the cap holds about 32.5 MB of it against 16.4 MB at 128, and a per-request size would reallocate it whenever the chosen size moved. On a 7,019-token prompt, 256 measured 16% faster than 128 with byte-identical output. |

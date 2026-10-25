@@ -1,8 +1,8 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+`TurboFieldfareServer` exposes a local Chat Completions API for one installed
+model (Gemma 4 or LFM2.5). It binds to `127.0.0.1` without authentication or
+TLS. Do not expose it through a proxy or tunnel.
 
 ## Start the server
 
@@ -169,6 +169,38 @@ does. With it, `pi -p @photo.png "What is in this image?"` sends the image as a
 base64 data URL in an `image_url` part, which is the shape this server accepts;
 its RPC interface takes an explicit `images` array and produces the same
 request.
+
+## LFM2.5
+
+Start the same binary against an installed LFM pack:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/lfm2.5-24b-a2b.gturbo \
+  --port 8080
+```
+
+The server reads `arch.family` and applies LFM defaults unless a flag overrides
+them:
+
+| Setting | Gemma 4 | LFM2.5 |
+| --- | --- | --- |
+| API model ID | `gemma-4-26b-a4b-it` | `lfm2.5-24b-a2b` |
+| Default context | 16,384 | 8,192 |
+| Expert-cache slots | 16 | 8 |
+| Vision | Optional pack | None |
+
+LFM tool definitions are passed through to the pinned ChatML template rather
+than rewritten into Gemma's schema. Tool calls use
+`<|tool_call_start|>[func(arg='x')]<|tool_call_end|>` and are returned in the
+same OpenAI `tool_calls` shape as Gemma. `finish_reason` is `tool_calls` when a
+call is parsed, `stop` on EOS, and `length` on the token limit.
+
+The generation prompt opens `<think>`, so reasoning stays in a suppressed
+channel; the server returns only visible content. A request carrying an image
+is rejected before prefill with HTTP 400 and code `unsupported_image`. Prompt
+reuse uses the rendered-prefix fast path; when that misses, LFM full-renders and
+prefills rather than using a Gemma bridge encoder.
 
 ## Prompt reuse
 

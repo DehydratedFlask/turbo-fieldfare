@@ -15,6 +15,30 @@ known prompt tokens in bounded chunks; decode generates one new token at a
 time. Both use the same mapped common weights, FP16 KV cache, and per-layer
 streamed-expert cache.
 
+## Model families
+
+The installed `manifest.json` carries `arch.family`. `ModelFamily` has two
+values today: `gemma4` (absent means Gemma, so existing manifests are
+unchanged) and `lfm2_moe`. `ManifestReader.peekFamily` reads only that field;
+`ArchConfig.canonical(for:)` maps it to the pinned architecture constants.
+
+Product code resolves the family once at load:
+
+- `TokenizerFactory` returns `GFTokenizer` or `LFM2Tokenizer`.
+- `Model.loadResolvingFamily` validates against the family's `ArchConfig` and
+  runtime tensor list.
+- `RunnerFactory` returns `RealForwardRunner` (Gemma) or `LFM2ForwardRunner`
+  (LFM).
+- The CLI, server, app, and decode service hold `any ModelTokenizer` and
+  `any TextRunner`; they do not branch on a hard-coded selected model.
+
+LFM's graph is separate because its block algebra differs: standard RMSNorm,
+short convolution interleaved with full attention, two dense layers followed by
+MoE, sigmoid+bias top-4 routing, SiLU dense FFN, no shared expert, no sliding
+window, no logit softcap, and a tied 6-bit embedding/lm-head. The conv state
+keeps the last two gated `Bx` rows plus a 128-token rewind ring; Gemma sandwich norms and K=V are not used. See
+[LFM2.5 24B-A2B](LFM2_5.md) for the tensor map and chat/tool rules.
+
 ## Why the runtime has this shape
 
 Only a few properties of Gemma 4 determine most of the system design:
