@@ -34,9 +34,13 @@ public enum ContinuationPlan: Sendable, Equatable {
 /// Family-neutral tokenizer surface for generation, chat rendering, and
 /// prompt continuation.
 ///
-/// Every runtime path that used to name `GFTokenizer` takes this protocol, so
-/// accepting a second model family is a matter of adding a conformance rather
-/// than branching at each call site.
+/// This is the target surface for every runtime path that used to name
+/// `GFTokenizer`. The paths migrated so far are `runRawCompletion` and the
+/// tokenizer/decoder factories; `ServerPromptCache`, the conversation identity
+/// and lineage code, and `MultimodalConversation` still take a concrete
+/// `GFTokenizer`, so a second family is not yet accepted end to end. Each
+/// remaining path moves over as its own task adds a conformance, rather than
+/// branching on family at the call site.
 public protocol ModelTokenizer: Sendable {
     var family: ModelFamily { get }
     var bosID: Int32 { get }

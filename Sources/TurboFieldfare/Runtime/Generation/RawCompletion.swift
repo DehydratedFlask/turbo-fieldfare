@@ -268,10 +268,11 @@ extension GenerationConfig {
 /// template). Stop handling, detokenizer flush ordering, and history append
 /// ordering are shared by both front ends.
 ///
-/// When the producer runs the fused lm_head (`RealForwardRunner` default) the
-/// logits buffer is never written; the loop then requires a pure-greedy config
-/// and reads `lastGreedyToken`. Callers with sampling configs must construct
-/// the runner with `forceLogitsHead: true`.
+/// When the producer reports the fused lm_head through
+/// `FusedGreedyHeadReporting` (`RealForwardRunner`'s default) the logits buffer
+/// is never written; the loop then requires a pure-greedy config and reads
+/// `lastGreedyToken`. Callers with sampling configs must construct the runner
+/// with `forceLogitsHead: true`.
 public func runRawCompletion(producer: any LogitProducer,
                              tokenizer: any ModelTokenizer,
                              promptIds: [Int32],

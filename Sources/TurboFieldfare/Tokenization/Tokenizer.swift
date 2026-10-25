@@ -570,6 +570,19 @@ extension GFTokenizer {
     /// Gemma continues a conversation through its bridge encoders, which
     /// reproduce the KV boundary from the message sequence; the cached token
     /// IDs add nothing the renderer does not already imply.
+    ///
+    /// **Precondition for `.reuse`:** the KV must hold exactly the rendering of
+    /// `cachedMessages`, the cached turn must have ended at the bridge boundary
+    /// (an end-of-turn, or a tool-call block whose next token is the tool
+    /// response marker), and a turn stopped at the token limit must have its
+    /// `uncommittedBoundaryTokenIDs` replayed before `suffixTokens`. This
+    /// function cannot prove any of that: it has no stop reason and, by
+    /// contract, ignores `cachedTokenIDs`, so it decides from message shape
+    /// alone. A caller that cannot establish the precondition must take
+    /// `.replayAll` or keep the `ServerPromptCache` gate
+    /// (`matchTextContinuation` / `matchToolContinuation`), which checks the
+    /// stop reason, prepends the boundary tokens for a token-limit stop, and
+    /// rejects a boundary mismatch.
     public func continuationPlan(cachedMessages: [ChatMessage],
                                  cachedTokenIDs: [Int32],
                                  incomingMessages: [ChatMessage],
