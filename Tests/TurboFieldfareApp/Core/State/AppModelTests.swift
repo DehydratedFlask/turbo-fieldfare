@@ -587,6 +587,27 @@ import Testing
         #expect(AppModel.contextOptionsNote(hostMemoryBytes: 25_769_803_776) == nil)
     }
 
+    @MainActor
+    @Test func selectModelChangesDescriptorPathAndDefaults() async throws {
+        let model = AppModel(client: MockInferenceClient(),
+                             installer: MockModelInstallerClient())
+        await model.selectModel(id: AppModelCatalog.lfm2_5.id)
+        #expect(model.selectedModelID == AppModelCatalog.lfm2_5.id)
+        #expect(model.modelPathText.hasSuffix("lfm2.5-24b-a2b.gturbo"))
+        #expect(model.runtimeOptions.expertCacheSlots == 8)
+        #expect(!model.isVisionAvailable)
+    }
+
+    @MainActor
+    @Test func selectModelIsRefusedWhileGenerating() async throws {
+        let model = AppModel(client: MockInferenceClient(),
+                             installer: MockModelInstallerClient())
+        model.runState = .running
+        let before = model.selectedModelID
+        await model.selectModel(id: AppModelCatalog.lfm2_5.id)
+        #expect(model.selectedModelID == before)
+    }
+
     private func makeSettingsRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppModelContext-\(UUID().uuidString)",

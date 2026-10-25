@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import TurboFieldfare
+import TurboFieldfareFormat
 import TurboFieldfareRepackCore
 import Observation
 
@@ -156,7 +157,11 @@ public final class AppModel {
     public private(set) var runIdentity: Int = 0
 
     let client: any AppInferenceClient
-    private let installer: any AppModelInstallerClient
+    public typealias AppModelInstallerFactory =
+        @Sendable (AppModelInstallDescriptor) -> any AppModelInstallerClient
+    private var installer: any AppModelInstallerClient
+    private let installerFactory: AppModelInstallerFactory
+    private let usesInjectedInstaller: Bool
     private let visionInstaller: any AppVisionPackInstallerClient
     /// The message currently on its way through the send pipeline, from the
     /// click to the commit or the hand-back. `isTurnInFlight` reads it, so a
@@ -244,7 +249,10 @@ public final class AppModel {
                 appDataDirectory: URL? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 client: any AppInferenceClient = RealInferenceClient(),
-                installer: any AppModelInstallerClient = RepackModelInstallerClient(),
+                installer: (any AppModelInstallerClient)? = nil,
+                installerFactory: @escaping AppModelInstallerFactory = {
+                    RepackModelInstallerClient(descriptor: $0)
+                },
                 visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
@@ -258,27 +266,67 @@ public final class AppModel {
                 },
                 hostMemoryBytes: UInt64 = ContextAdmission.hostMemoryBytes) {
         let dataRoot = AppDataLocation.resolve(explicitURL: appDataDirectory, environment: environment)
-        let defaultModel = environment["TURBO_FIELDFARE_APP_DATA_PATH"] != nil
+        let provisionalDefault = environment["TURBO_FIELDFARE_APP_DATA_PATH"] != nil
             ? dataRoot.appendingPathComponent("gemma4.gturbo", isDirectory: true)
             : AppModelLocation.defaultURL(environment: environment)
-        let legacy = (modelDirectory ?? defaultModel).standardizedFileURL
+        let legacy = (modelDirectory ?? provisionalDefault).standardizedFileURL
         let bootstrap = AppDataBootstrap(root: dataRoot, legacyModel: legacy,
                                          environment: environment, modelOverride: modelDirectory != nil, enabled: settingsPersistenceEnabled)
         let settings = bootstrap.settings
+        let environmentPath = environment["TURBO_FIELDFARE_MODEL_PATH"].flatMap {
+            $0.isEmpty ? nil : $0
+        }
+        let persistedPath = modelDirectory?.standardizedFileURL.path
+            ?? environmentPath
+            ?? settings.selectedModelPath
+
+        let selectedDescriptor: AppModelInstallDescriptor
+        let selectedModelID: String
+        let selectedFromProbe: Bool
+        if let modelDirectory,
+           let family = try? ManifestReader.peekFamily(directoryURL: modelDirectory) {
+            selectedDescriptor = AppModelCatalog.descriptor(family: family)
+            selectedModelID = selectedDescriptor.id
+            selectedFromProbe = true
+        } else if let id = settings.selectedModelID {
+            selectedDescriptor = AppModelCatalog.descriptor(id: id)
+            selectedModelID = selectedDescriptor.id
+            selectedFromProbe = false
+        } else if let persistedPath,
+                  let family = try? ManifestReader.peekFamily(
+                    directoryURL: URL(fileURLWithPath: persistedPath, isDirectory: true)) {
+            selectedDescriptor = AppModelCatalog.descriptor(family: family)
+            selectedModelID = selectedDescriptor.id
+            selectedFromProbe = true
+        } else {
+            selectedDescriptor = AppModelCatalog.gemma4
+            selectedModelID = selectedDescriptor.id
+            selectedFromProbe = false
+        }
+
+        let defaultModel = environment["TURBO_FIELDFARE_APP_DATA_PATH"] != nil
+            ? dataRoot.appendingPathComponent(selectedDescriptor.defaultFilename,
+                                              isDirectory: true)
+            : AppModelLocation.defaultURL(environment: environment,
+                                          persistedPath: persistedPath,
+                                          filename: selectedDescriptor.defaultFilename)
         let directory: URL
         if let modelDirectory { directory = modelDirectory.standardizedFileURL }
-        else if let override = environment["TURBO_FIELDFARE_MODEL_PATH"], !override.isEmpty {
-            directory = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        else if let environmentPath {
+            directory = URL(fileURLWithPath: environmentPath, isDirectory: true)
+                .standardizedFileURL
         } else if let saved = settings.selectedModelPath {
             directory = URL(fileURLWithPath: saved, isDirectory: true).standardizedFileURL
         } else { directory = defaultModel.standardizedFileURL }
         self.appDataDirectory = dataRoot
-        self.isModelLocationOverridden = modelDirectory != nil || !(environment["TURBO_FIELDFARE_MODEL_PATH"] ?? "").isEmpty
+        self.isModelLocationOverridden = modelDirectory != nil || environmentPath != nil
         self.isModelChoiceRequired = bootstrap.modelChoiceRequired
         self.settingsDiagnostic = bootstrap.failure
         self.canResetSettings = settingsPersistenceEnabled && bootstrap.canResetSettings
         self.settingsWritesAllowed = bootstrap.failure == nil
         self.savedModelPath = settings.selectedModelPath
+        self.selectedModelID = selectedModelID
+        self.selectedModelDescriptor = selectedDescriptor
         self.migratedHistorySources = settings.migratedHistorySources
         let installETAClock = SuspendingClock()
         self.modelPathText = directory.path
@@ -288,14 +336,18 @@ public final class AppModel {
         // a CLI or server operator, not to someone using the app, where it was
         // one more setting whose effect no figure on screen could show.
         // `keepReady` remains available through AppRuntimeOptions for those.
+        let savedSlots = selectedFromProbe
+            && settings.expertCacheSlots == AppModelCatalog.gemma4.defaultExpertCacheSlots
+            ? selectedDescriptor.defaultExpertCacheSlots
+            : settings.expertCacheSlots
         self.runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: settings.expertCacheSlots,
+            expertCacheSlots: savedSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
         let admitted = Self.admittedContext(settings.contextTokens,
                                             hostMemoryBytes: hostMemoryBytes,
-                                            expertCacheSlots: settings.expertCacheSlots)
+                                            expertCacheSlots: savedSlots)
         self.maxContextTokens = admitted.tokens
         self.contextClampNotice = admitted.notice
         self.temperature = settings.temperature
@@ -312,7 +364,9 @@ public final class AppModel {
         self.installationStatus = AppModelInstallationProbe.status(at: directory)
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
         self.client = client
-        self.installer = installer
+        self.usesInjectedInstaller = installer != nil
+        self.installerFactory = installerFactory
+        self.installer = installer ?? installerFactory(selectedDescriptor)
         self.visionInstaller = visionInstaller
         self.memorySampler = memorySampler
         self.attachmentStore = attachmentStore
@@ -442,7 +496,15 @@ public final class AppModel {
 
     public var requiresModelInstallation: Bool { !isModelInstalled }
 
-    public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
+    public private(set) var selectedModelID: String = AppModelCatalog.gemma4.id
+    public private(set) var selectedModelDescriptor: AppModelInstallDescriptor = AppModelCatalog.gemma4
+    public var modelCatalog: [AppModelInstallDescriptor] { AppModelCatalog.all }
+    public var isVisionAvailable: Bool { selectedModelDescriptor.supportsVision }
+    public var selectedArchConfig: ArchConfig {
+        ArchConfig.canonical(for: selectedModelDescriptor.family) ?? .gemma4_26B_A4B
+    }
+
+    public var installDescriptor: AppModelInstallDescriptor { selectedModelDescriptor }
 
     public var installRequirement: AppModelInstallRequirement? {
         installReadiness.requirement
@@ -924,14 +986,44 @@ public final class AppModel {
     public func selectModelLocation(_ url: URL, intent: ModelLocationIntent) async {
         guard canChangeModelLocation else { return }
         let candidate = intent == .download
-            ? url.appendingPathComponent("gemma4.gturbo", isDirectory: true) : url
+            ? url.appendingPathComponent(installDescriptor.defaultFilename, isDirectory: true)
+            : url
         do {
-            try AppModelLocation.validate(candidate, intent: intent)
+            try AppModelLocation.validate(candidate, intent: intent,
+                                          descriptor: installDescriptor)
             modelLocationDiagnostic = nil
             await changeModelURL(candidate, persistSelection: true)
         } catch {
             modelLocationDiagnostic = "Could not select model location: \(error)"
         }
+    }
+
+    /// Switch the catalog selection and move the active model to that
+    /// descriptor's default path. Refused while a turn, load, install, or
+    /// vision operation owns the runtime.
+    public func selectModel(id: String) async {
+        let descriptor = AppModelCatalog.descriptor(id: id)
+        guard descriptor.id != selectedModelID else { return }
+        guard !isRunning, !loadState.isLoading, !isInstallingModel,
+              !isVisionCompanionOperationInProgress, !isChangingModelLocation,
+              !isTurnInFlight, !isModelLocationOverridden else { return }
+
+        installer.cancel()
+        installTask?.cancel()
+        installGeneration &+= 1
+        installState = .idle
+        resetInstallETA()
+        selectedModelID = descriptor.id
+        selectedModelDescriptor = descriptor
+        if !usesInjectedInstaller {
+            installer = installerFactory(descriptor)
+        }
+        clearImages()
+        runtimeOptions.expertCacheSlots = descriptor.defaultExpertCacheSlots
+        let target = URL(fileURLWithPath: modelPathText, isDirectory: true)
+            .deletingLastPathComponent()
+            .appendingPathComponent(descriptor.defaultFilename, isDirectory: true)
+        await changeModelURL(target, persistSelection: true)
     }
 
     /// Internal callers already validated their candidate; UI uses selectModelLocation.
@@ -960,6 +1052,7 @@ public final class AppModel {
             do {
                 var settings = currentSettings()
                 settings.selectedModelPath = directory.path
+                settings.selectedModelID = selectedModelID
                 try MacAppSettingsFileStore.save(settings, at: AppDataLocation.settingsURL(in: appDataDirectory))
                 savedModelPath = directory.path
                 settingsDiagnostic = nil
@@ -2207,6 +2300,7 @@ public final class AppModel {
     private func currentSettings() -> MacAppSettings {
         MacAppSettings(
             selectedModelPath: savedModelPath,
+            selectedModelID: selectedModelID,
             migratedHistorySources: migratedHistorySources,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,

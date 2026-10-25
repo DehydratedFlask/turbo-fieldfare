@@ -1,4 +1,5 @@
 import TurboFieldfareAppCore
+import TurboFieldfareFormat
 import TurboFieldfareMacPresentation
 import SwiftUI
 
@@ -10,6 +11,7 @@ struct ModelInstallView: View {
         ScrollView {
             VStack(spacing: 22) {
                 identity
+                modelPicker
                 ModelLocationView(model: model)
                 actions
                 VStack(alignment: .leading, spacing: 8) {
@@ -53,6 +55,27 @@ struct ModelInstallView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
+    }
+
+    private var modelPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Model", selection: Binding(
+                get: { model.selectedModelID },
+                set: { id in Task { await model.selectModel(id: id) } }
+            )) {
+                ForEach(model.modelCatalog) { descriptor in
+                    Text(descriptor.displayName).tag(descriptor.id)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .disabled(model.isInstallingModel || model.isRunning || model.isChangingModelLocation)
+            .accessibilityIdentifier("installModelPicker")
+
+            Text("\(model.installDescriptor.family.rawValue) · \(model.installDescriptor.defaultFilename)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var storageCard: some View {

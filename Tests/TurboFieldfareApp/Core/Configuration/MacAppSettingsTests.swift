@@ -52,6 +52,20 @@ import Testing
         #expect(settings == MacAppSettings())
     }
 
+    @Test func settingsWithoutSelectedModelIDDecodeAsNoSelection() throws {
+        let legacy = #"{"version":4,"contextTokens":8192,"expertCacheSlots":16,"temperature":0.2,"topKEnabled":true,"topK":64,"topPEnabled":true,"topP":0.95,"prefillEnabled":true}"#
+        let settings = try JSONDecoder().decode(MacAppSettings.self, from: Data(legacy.utf8))
+        #expect(settings.selectedModelID == nil)
+    }
+
+    @Test func selectedModelIDRoundTrips() throws {
+        var settings = MacAppSettings()
+        settings.selectedModelID = AppModelCatalog.lfm2_5.id
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self, from: try JSONEncoder().encode(settings))
+        #expect(decoded.selectedModelID == AppModelCatalog.lfm2_5.id)
+    }
+
     @Test func legacySettingsDefaultToReturnWithoutLosingValues() throws {
         let data = Data("""
         {

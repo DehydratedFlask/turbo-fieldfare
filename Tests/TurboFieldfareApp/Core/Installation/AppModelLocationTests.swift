@@ -44,6 +44,19 @@ import Testing
             fileExists: { _ in false })
         #expect(result.path == "/support/TurboFieldfare/gemma4.gturbo")
     }
+
+    @Test func resolveUsesTheDescriptorFilename() {
+        let url = AppModelLocation.resolve(
+            explicitURL: nil,
+            environment: [:],
+            persistedPath: nil,
+            executableURL: nil,
+            currentDirectoryURL: URL(fileURLWithPath: "/tmp"),
+            applicationSupportURL: URL(fileURLWithPath: "/tmp/support"),
+            fileExists: { _ in false },
+            filename: "lfm2.5-24b-a2b.gturbo")
+        #expect(url.lastPathComponent == "lfm2.5-24b-a2b.gturbo")
+    }
 }
 
 @Suite struct SelectedModelLocationValidationTests {
@@ -66,7 +79,7 @@ import Testing
             try AppModelLocation.validate(directory.deletingLastPathComponent(), intent: .existing)
             Issue.record("Parent selection must require choosing the text model itself")
         } catch {
-            #expect(String(describing: error).contains("Choose the gemma4.gturbo folder inside this folder"))
+            #expect(String(describing: error).contains("Choose the completed text model folder inside this folder"))
         }
     }
 

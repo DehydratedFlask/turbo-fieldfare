@@ -8,6 +8,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     var version: Int = currentVersion
     var selectedModelPath: String?
+    var selectedModelID: String?
     var migratedHistorySources: [String] = []
     var contextTokens: Int = AppContextLengthOption.eightK.tokens
     var expertCacheSlots: Int = 16
@@ -34,6 +35,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case version
         case selectedModelPath
+        case selectedModelID
         case migratedHistorySources
         case contextTokens
         case expertCacheSlots
@@ -55,6 +57,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     init(version: Int = currentVersion,
          selectedModelPath: String? = nil,
+         selectedModelID: String? = nil,
          migratedHistorySources: [String] = [],
          contextTokens: Int = AppContextLengthOption.eightK.tokens,
          expertCacheSlots: Int = 16,
@@ -74,6 +77,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          loadModelOnLaunch: Bool = false) {
         self.version = version
         self.selectedModelPath = selectedModelPath
+        self.selectedModelID = selectedModelID
         self.migratedHistorySources = migratedHistorySources
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -97,6 +101,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(Int.self, forKey: .version)
         selectedModelPath = try container.decodeIfPresent(String.self, forKey: .selectedModelPath)
+        selectedModelID = try container.decodeIfPresent(String.self, forKey: .selectedModelID)
         migratedHistorySources = try container.decodeIfPresent([String].self, forKey: .migratedHistorySources) ?? []
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
@@ -147,6 +152,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// Schema routing happens before decoding; value validation never replaces a damaged file.
     func isValid() -> Bool {
         (selectedModelPath.map { $0.hasPrefix("/") && !$0.contains("\0") } ?? true)
+            && (selectedModelID == nil || AppModelCatalog.all.contains { $0.id == selectedModelID })
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)

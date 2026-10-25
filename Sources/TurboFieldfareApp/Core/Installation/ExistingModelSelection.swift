@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public struct ExistingModelCandidate: Identifiable, Equatable, Sendable {
     public var id: String { textURL.path }
@@ -7,13 +8,16 @@ public struct ExistingModelCandidate: Identifiable, Equatable, Sendable {
     public let textStatus: AppModelInstallationStatus
     public let visionURL: URL
     public let visionStatus: AppVisionPackInstallationStatus
+    public let family: ModelFamily?
+    public let displayName: String
     public var canSelect: Bool { textStatus == .complete }
 
     public var textSummary: String {
-        switch textStatus {
-        case .complete: "Text model ready"
-        case .missing: "Incomplete text model: manifest.json is missing."
-        case .partial(let reason): "Text model unavailable: \(reason)"
+        let name = "\(displayName) (\(family?.rawValue ?? "unknown"))"
+        return switch textStatus {
+        case .complete: "\(name) — text model ready"
+        case .missing: "\(name) — incomplete text model: manifest.json is missing."
+        case .partial(let reason): "\(name) — unavailable: \(reason)"
         }
     }
 
@@ -69,9 +73,13 @@ public enum ExistingModelSelection {
 
     public static func candidate(at textURL: URL) throws -> ExistingModelCandidate {
         let textURL = AppModelLocation.canonicalURL(textURL)
+        let family = try? ManifestReader.peekFamily(directoryURL: textURL)
+        let descriptor = family.map(AppModelCatalog.descriptor(family:)) ?? .default
         return ExistingModelCandidate(textURL: textURL,
                                       textStatus: AppModelInstallationProbe.status(at: textURL),
                                       visionURL: try VisionPackLocation.companionURL(forTextModel: textURL),
-                                      visionStatus: AppVisionPackInstallationProbe.status(at: textURL))
+                                      visionStatus: AppVisionPackInstallationProbe.status(at: textURL),
+                                      family: family,
+                                      displayName: descriptor.displayName)
     }
 }

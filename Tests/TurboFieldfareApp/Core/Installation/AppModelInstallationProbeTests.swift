@@ -83,4 +83,20 @@ import Testing
             return
         }
     }
+
+    @Test func probeResolvesFamilyWhenNoDescriptorIsGiven() throws {
+        let directory = try makeInstalledModelDirectory(family: .lfm2Moe)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(AppModelInstallationProbe.status(at: directory) == .complete)
+    }
+
+    @Test func probeRejectsADescriptorFromAnotherFamily() throws {
+        let directory = try makeInstalledModelDirectory(family: .lfm2Moe)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        guard case .partial(let reason) = AppModelInstallationProbe.status(
+            at: directory, descriptor: AppModelCatalog.gemma4) else {
+            Issue.record("expected partial"); return
+        }
+        #expect(reason.contains("lfm2_moe"))
+    }
 }

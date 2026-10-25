@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareFormat
 
 public enum AppModelInstallationStatus: Equatable, Sendable {
     case missing
@@ -10,7 +11,7 @@ public enum AppModelInstallationStatus: Equatable, Sendable {
 public enum AppModelInstallationProbe {
     public static func status(
         at directory: URL,
-        descriptor: AppModelInstallDescriptor = .default
+        descriptor: AppModelInstallDescriptor? = nil
     ) -> AppModelInstallationStatus {
         let directory = directory.standardizedFileURL
         let manifestURL = directory.appendingPathComponent("manifest.json")
@@ -19,10 +20,19 @@ public enum AppModelInstallationProbe {
         }
 
         do {
-            let manifest = try ManifestReader.load(directoryURL: directory, expecting: .gemma4_26B_A4B)
-            let expectedSource = "sha256:" + descriptor.sourceIndexSHA256
+            let family = try ManifestReader.peekFamily(directoryURL: directory)
+            let expected = descriptor ?? AppModelCatalog.descriptor(family: family)
+            guard expected.family == family else {
+                return .partial(
+                    "installed model is \(family.rawValue), expected \(expected.family.rawValue)")
+            }
+            guard let config = ArchConfig.canonical(for: family) else {
+                return .partial("unsupported model family: \(family.rawValue)")
+            }
+            let manifest = try ManifestReader.load(directoryURL: directory, expecting: config)
+            let expectedSource = "sha256:" + expected.sourceIndexSHA256
             guard manifest.sourceSnapshotHash == expectedSource else {
-                return .partial("installed checkpoint does not match \(descriptor.displayName)")
+                return .partial("installed checkpoint does not match \(expected.displayName)")
             }
             let layout = directory.appendingPathComponent("packed_experts/layout.json")
             guard FileManager.default.fileExists(atPath: layout.path) else {
