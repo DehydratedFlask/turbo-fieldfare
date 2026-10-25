@@ -271,6 +271,9 @@ public func run(args: Args,
                     if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
                 case .tail(let tail):
                     stdout.write(Data(tail.utf8))
+                case .reasoning:
+                    // The CLI prints the visible answer only.
+                    break
                 }
             }
 

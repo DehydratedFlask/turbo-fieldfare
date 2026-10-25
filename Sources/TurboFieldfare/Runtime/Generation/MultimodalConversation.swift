@@ -574,6 +574,9 @@ public actor MultimodalConversation {
                     case .prefill:
                         // The first progress report is the proof the KV moved.
                         kvAdvanced = true
+                    case .reasoning:
+                        // Reasoning text is not part of the turn's transcript.
+                        break
                     }
                 }
         } catch let generationError {

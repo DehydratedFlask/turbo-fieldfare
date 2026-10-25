@@ -1,6 +1,7 @@
 import Foundation
 import Hub
 import Tokenizers
+import TurboFieldfareFormat
 
 public enum GFTokenizerError: Error, CustomStringConvertible {
     case missingSpecialToken(String)
@@ -42,7 +43,7 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 /// TurboFieldfare owns the minimal chat framing because the upstream
 /// `tokenizer_config.json` has no `chat_template`. Literal control-token text in
 /// user content is accepted as a trusted-input research-runtime limitation.
-public struct GFTokenizer: @unchecked Sendable {
+public struct GFTokenizer: ModelTokenizer, @unchecked Sendable {
     public static let modelID = "google/gemma-4-26B-A4B-it"
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
@@ -330,7 +331,8 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let turnClose   = "<turn|>"
     private static let bosMark     = "<bos>"
 
-    public func applyChatTemplate(_ messages: [Message]) throws -> String {
+    public func applyChatTemplate(_ messages: [Message],
+                                  addGenerationPrompt: Bool = true) throws -> String {
         var s = Self.bosMark
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
@@ -343,12 +345,15 @@ public struct GFTokenizer: @unchecked Sendable {
             let role = message.role == .assistant ? "model" : message.role.rawValue
             s += Self.turnOpen + role + "\n" + content + Self.turnClose + "\n"
         }
-        s += Self.turnOpen + "model\n<|channel>thought\n<channel|>"
+        if addGenerationPrompt {
+            s += Self.turnOpen + "model\n<|channel>thought\n<channel|>"
+        }
         return s
     }
 
     public func encodeToolChat(messages: [Message],
-                               tools: [FunctionDefinition]) throws -> [Int32] {
+                               tools: [FunctionDefinition],
+                               addGenerationPrompt: Bool = true) throws -> [Int32] {
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }
@@ -386,7 +391,7 @@ public struct GFTokenizer: @unchecked Sendable {
         return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
-            addGenerationPrompt: true,
+            addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
@@ -535,6 +540,80 @@ public struct GFTokenizer: @unchecked Sendable {
                 "tool-result continuation does not begin at the KV boundary")
         }
         return suffix
+    }
+}
+
+// MARK: - ModelTokenizer
+
+extension GFTokenizer {
+    public var family: ModelFamily { .gemma4 }
+
+    public var chatTemplateIdentity: String { Self.chatTemplateIdentity }
+
+    public func makeStreamingDetokenizer() -> any StreamingDetokenizer {
+        GFDetokenizer(tokenizer: self, barrierTokenIDs: structuralMarkerIDs)
+    }
+
+    public func applyChatTemplate(messages: [ChatMessage],
+                                  tools: [ToolDefinition]?,
+                                  addGenerationPrompt: Bool) throws -> [Int32] {
+        if let tools, !tools.isEmpty {
+            return try encodeToolChat(messages: messages,
+                                      tools: tools,
+                                      addGenerationPrompt: addGenerationPrompt)
+        }
+        return encode(try applyChatTemplate(messages,
+                                            addGenerationPrompt: addGenerationPrompt),
+                      addBOS: false)
+    }
+
+    /// Gemma continues a conversation through its bridge encoders, which
+    /// reproduce the KV boundary from the message sequence; the cached token
+    /// IDs add nothing the renderer does not already imply.
+    public func continuationPlan(cachedMessages: [ChatMessage],
+                                 cachedTokenIDs: [Int32],
+                                 incomingMessages: [ChatMessage],
+                                 tools: [ToolDefinition]?) throws -> ContinuationPlan {
+        guard incomingMessages.count > cachedMessages.count,
+              incomingMessages.prefix(cachedMessages.count)
+                .elementsEqual(cachedMessages),
+              let assistant = cachedMessages.last,
+              assistant.role == .assistant else {
+            return .replayAll(try applyChatTemplate(
+                messages: incomingMessages,
+                tools: tools,
+                addGenerationPrompt: true))
+        }
+        let continuation = Array(incomingMessages.dropFirst(cachedMessages.count))
+        if assistant.toolCalls.isEmpty {
+            if continuation.count == 1,
+               let message = continuation.first,
+               message.role == .user,
+               message.toolCalls.isEmpty,
+               message.toolCallID == nil,
+               let content = message.content {
+                return .reuse(
+                    prefixTokens: [],
+                    suffixTokens: encodeTextContinuation(userContent: content))
+            }
+        } else if let tools, !tools.isEmpty,
+                  continuation.allSatisfy({ $0.role == .tool && $0.toolCalls.isEmpty }) {
+            return .reuse(
+                prefixTokens: [],
+                suffixTokens: try encodeToolResultContinuation(
+                    cachedMessages: Array(cachedMessages.dropLast()),
+                    assistant: assistant,
+                    incomingMessages: incomingMessages,
+                    tools: tools))
+        }
+        return .replayAll(try applyChatTemplate(
+            messages: incomingMessages,
+            tools: tools,
+            addGenerationPrompt: true))
+    }
+
+    public func makeAssistantDecoder(allowedTools: Set<String>) -> (any StructuredOutputDecoder)? {
+        StructuredAssistantDecoder(tokenizer: self, allowedTools: allowedTools)
     }
 }
 

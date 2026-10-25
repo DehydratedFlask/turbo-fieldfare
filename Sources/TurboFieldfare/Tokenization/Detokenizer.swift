@@ -36,7 +36,7 @@ import Tokenizers
 /// token list on every push, which made a generation O(n²) — roughly 3.6·10⁹
 /// dictionary lookups over the app's 64K-token budget — and compared the result
 /// against the full emitted prefix to recover a delta.
-struct GFDetokenizer {
+struct GFDetokenizer: StreamingDetokenizer {
     let tokenizer: any Tokenizer
     let skipSpecialTokens: Bool
     private let specialTokenIDs: Set<Int32>

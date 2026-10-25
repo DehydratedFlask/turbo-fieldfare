@@ -3,6 +3,9 @@ import Foundation
 public enum StructuredAssistantEvent: Equatable, Sendable {
     case content(String)
     case toolCall(ParsedToolCall)
+    /// The assistant entered or left its reasoning channel. The text itself is
+    /// not part of the event; it is suppressed on the visible answer path.
+    case reasoning(Bool)
 }
 
 public final class StructuredAssistantDecoder: @unchecked Sendable {
@@ -143,3 +146,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public var hasToolCalls: Bool { emittedCalls > 0 }
 }
+
+/// The decoder is stateful per generation but owned by a single stream; the
+/// class-level `@unchecked Sendable` above is what carries the protocol's
+/// `Sendable` requirement without re-checking its mutable channel state.
+extension StructuredAssistantDecoder: StructuredOutputDecoder {}

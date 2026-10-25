@@ -5,9 +5,11 @@ import Metal
 /// producer-defined prompt progress; scalar replay reports per token, while a
 /// prefill-capable producer may report per internal chunk. `.token` fires per
 /// decoded non-stop token; `.tail` carries the detokenizer flush remainder at a
-/// stop boundary.
+/// stop boundary. `.reasoning` reports that the assistant entered or left its
+/// reasoning channel.
 public enum RawDecodeProgress: Sendable {
     case prefill(done: Int, total: Int)
+    case reasoning(Bool)
     case token(index: Int, id: Int32, delta: String)
     case tail(String)
 }
@@ -271,7 +273,7 @@ extension GenerationConfig {
 /// and reads `lastGreedyToken`. Callers with sampling configs must construct
 /// the runner with `forceLogitsHead: true`.
 public func runRawCompletion(producer: any LogitProducer,
-                             tokenizer: GFTokenizer,
+                             tokenizer: any ModelTokenizer,
                              promptIds: [Int32],
                              multimodalInput: MultimodalPrefillInput? = nil,
                              config: GenerationConfig,
@@ -285,7 +287,7 @@ public func runRawCompletion(producer: any LogitProducer,
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
     }
-    let fusedRunner = producer as? RealForwardRunner
+    let fusedRunner = producer as? any FusedGreedyHeadReporting
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(
@@ -298,8 +300,7 @@ public func runRawCompletion(producer: any LogitProducer,
     let cachedPromptTokens = try start.cachedPromptTokens(
         promptCount: promptIds.count, producer: producer)
 
-    var detok = GFDetokenizer(tokenizer: tokenizer,
-                              barrierTokenIDs: tokenizer.structuralMarkerIDs)
+    var detok = tokenizer.makeStreamingDetokenizer()
 
     if let context = producer as? any ContextWindowReporting,
        promptIds.count + config.maxNewTokens > context.maxContext {
@@ -344,8 +345,8 @@ public func runRawCompletion(producer: any LogitProducer,
                 tokenID = try sampleOnce(scratch: scratch, context: context,
                                          history: history, config: config, position: generated)
             }
-        } else if fusedGreedy {
-            tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
+        } else if fusedGreedy, let fusedRunner {
+            tokenID = Int32(bitPattern: fusedRunner.lastGreedyToken)
         } else {
             tokenID = try sampleOnce(scratch: scratch, context: context,
                                      history: history, config: config, position: generated)

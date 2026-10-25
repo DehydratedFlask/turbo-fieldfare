@@ -1026,11 +1026,18 @@ public actor ServerModelSession: ServerInferenceBackend {
                             case .toolCall(let call):
                                 calls.append(call)
                                 onEvent(.toolCall(call))
+                            case .reasoning:
+                                // Reasoning-state wiring lands with the
+                                // family-neutral server pass; this task only
+                                // introduces the event.
+                                break
                             }
                         }
                     }
                     switch progress {
                     case .prefill:
+                        break
+                    case .reasoning:
                         break
                     case .token(_, let tokenID, let delta):
                         let events = if let decoder {

@@ -810,6 +810,10 @@ actor RealInferenceSession {
                         progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
+                case .reasoning:
+                    // Reasoning-state UI wiring lands with the family-neutral
+                    // app pass; this task only introduces the event.
+                    break
                 case .token(let index, _, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
