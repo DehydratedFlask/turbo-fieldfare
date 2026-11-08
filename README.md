@@ -1,4 +1,6 @@
-> **Fork:** This is [DehydratedFlask/turbo-fieldfare](https://github.com/DehydratedFlask/turbo-fieldfare), a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare). It adds LFM2.5 24B-A2B as a second selectable model. Gemma 4 remains the default.
+> **Fork:** This is [DehydratedFlask/turbo-fieldfare](https://github.com/DehydratedFlask/turbo-fieldfare),
+> a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare).
+> It adds LFM2.5 24B-A2B as a second selectable model. Gemma 4 remains the default.
 
 <p align="center">
   <img src="docs/assets/turbofieldfare-logo-rounded.png" alt="TurboFieldfare logo: a fieldfare inside a segmented cache ring" width="280">
@@ -62,8 +64,8 @@ this checkout publishes no LFM2.5 speed or memory benchmark.
 | Install source | `--model-source gemma4` | `--model-source lfm2_moe` |
 | Installed size | About 14.3 GB | About 13.6 GB |
 | Vision | Optional 1.1 GB companion pack on M2 or newer | None; image requests are refused |
-| App and CLI context | 8,192 tokens | 8,192 tokens |
-| Server context and slots | 16,384 tokens; 16 slots | 8,192 tokens; 8 slots |
+| Default app/CLI context | 8,192 tokens | 8,192 tokens |
+| Server defaults | 16,384 tokens; 16 slots | 8,192 tokens; 8 slots |
 | Decode speed | 5.1-6.3 tok/s on an 8 GB M2; 31-35 tok/s on a 24 GB M5 Pro | Not yet measured |
 | Weights memory | About 2 GB with a 4K KV cache | Bounded expert streaming; not yet measured |
 
@@ -582,7 +584,7 @@ their source terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
 the Gemma 4, LFM2.5, and Swift package license review.
 
 TurboFieldfare is an independent research project. It is not affiliated with,
-sponsored by, or endorsed by Google.
+sponsored by, or endorsed by Google or Liquid AI.
 
 *The afterword below is from the upstream author, Andrey Mikhaylov.*
 
