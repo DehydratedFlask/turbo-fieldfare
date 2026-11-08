@@ -1,3 +1,5 @@
+> **Fork:** This is [DehydratedFlask/turbo-fieldfare](https://github.com/DehydratedFlask/turbo-fieldfare), a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare). It adds LFM2.5 24B-A2B as a second selectable model. Gemma 4 remains the default.
+
 <p align="center">
   <img src="docs/assets/turbofieldfare-logo-rounded.png" alt="TurboFieldfare logo: a fieldfare inside a segmented cache ring" width="280">
 </p>
@@ -5,8 +7,8 @@
 <h1 align="center">TurboFieldfare</h1>
 
 <p align="center">
-  <strong>Gemma 4 26B-A4B inference in about 2 GB of RAM</strong><br>
-  A custom Swift + Metal runtime for any Apple Silicon Mac, even the 8 GB ones.
+  <strong>Gemma 4 26B-A4B in about 2 GB — now with LFM2.5 24B-A2B</strong><br>
+  A custom Swift + Metal runtime for bounded-memory inference on Apple Silicon.
 </p>
 
 <p align="center">
@@ -17,6 +19,7 @@
 </p>
 
 <p align="center">
+  <a href="#choose-a-model">Choose a model</a> ·
   <a href="#try-it">Quick start</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
@@ -28,6 +31,8 @@
 
 ![TurboFieldfare Mac app generating text with Gemma 4 26B-A4B](docs/assets/turbofieldfare-app.webp)
 
+*The Mac app running Gemma 4. The install picker also offers LFM2.5 24B-A2B.*
+
 Memory got expensive. So I gave a 26-billion-parameter model a ~2 GB budget.
 
 TurboFieldfare runs the instruction-tuned
@@ -38,15 +43,39 @@ for each token from SSD. This is what lets the model run on Macs with 8 GB of
 RAM.
 
 The runtime, streaming installer, CLI, and native Mac app are written in Swift
-and Metal. TurboFieldfare is model-specific rather than a wrapper around MLX or
-llama.cpp. The curated [experiment record](docs/experiments/EXPERIMENT_INVENTORY.md)
-summarizes 103 measured results across kernels, caching, I/O, prefill, and
-decode.
+and Metal. TurboFieldfare is a purpose-built runtime rather than a wrapper
+around MLX or llama.cpp. The curated
+[experiment record](docs/experiments/EXPERIMENT_INVENTORY.md) summarizes 103
+measured results across kernels, caching, I/O, prefill, and decode.
+
+This fork keeps that runtime and adds **LFM2.5 24B-A2B** as a selectable
+second architecture. Gemma 4 stays the default. Both models install as separate
+`.gturbo` directories, and the installed manifest's `arch.family` selects the
+tokenizer, runner, chat framing, and memory profile. LFM2.5 is text-only, and
+this checkout publishes no LFM2.5 speed or memory benchmark.
+
+## Choose a model
+
+| | **Gemma 4 26B-A4B IT** (default) | **LFM2.5 24B-A2B** (added in this fork) |
+| --- | --- | --- |
+| Best for | Optional vision and the published Gemma benchmarks | Text-only ChatML chat with hidden reasoning and server-side tools |
+| Install source | `--model-source gemma4` | `--model-source lfm2_moe` |
+| Installed size | About 14.3 GB | About 13.6 GB |
+| Vision | Optional 1.1 GB companion pack on M2 or newer | None; image requests are refused |
+| App and CLI context | 8,192 tokens | 8,192 tokens |
+| Server context and slots | 16,384 tokens; 16 slots | 8,192 tokens; 8 slots |
+| Decode speed | 5.1-6.3 tok/s on an 8 GB M2; 31-35 tok/s on a 24 GB M5 Pro | Not yet measured |
+| Weights memory | About 2 GB with a 4K KV cache | Bounded expert streaming; not yet measured |
+
+Both models install as separate `.gturbo` directories and can sit side by
+side. Gemma 4 remains the default for new and existing users. A path is never
+guessed from its filename; the manifest decides the family. LFM2.5 has no
+vision tower.
 
 ## Try it
 
 ```bash
-git clone https://github.com/drumih/turbo-fieldfare.git
+git clone https://github.com/DehydratedFlask/turbo-fieldfare.git
 cd turbo-fieldfare
 swift build -c release
 .build/release/TurboFieldfareMac
@@ -56,29 +85,50 @@ On the first run, Swift Package Manager downloads and builds the Swift packages
 required by the tokenizer. The complete release build includes the foreground
 Mac app and its sibling decode-service executable.
 
-When the app opens, choose **Download Model** and let TurboFieldfare fetch and repack
-the pinned model (about 15 GB). Once it is ready, choose **Load Model**, type
-your prompt, and press **Generate**.
+When the app opens, select **Gemma 4** or **LFM2.5 24B-A2B** in the model
+picker, then choose the matching **Download** button and let TurboFieldfare
+fetch and repack the pinned checkpoint (about 15 GB for Gemma 4, about 13.6 GB
+for LFM2.5). Once it is ready, choose **Load Model**, type your prompt, and
+press **Generate**.
+
+The two models install side by side; only one runs at a time. LFM2.5 has no
+image pack.
+
+Or install from the CLI:
+
+```bash
+# Gemma 4 (default)
+swift run -c release TurboFieldfareRepack \
+  --model-source gemma4 \
+  --output scratch/gemma4.gturbo
+
+# LFM2.5 24B-A2B
+swift run -c release TurboFieldfareRepack \
+  --model-source lfm2_moe \
+  --output scratch/lfm2.5-24b-a2b.gturbo
+```
 
 ## At a glance
 
-| Metric          | Value                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Model           | Gemma 4 26B-A4B IT, 26B total parameters, about 3.88B active per token                                                   |
-| Weights         | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts                                                |
-| Memory          | ~2 GB of weights and 4K KV cache                                                                                         |
-| Storage         | About 14.3 GB for the text model, plus about 1.1 GB for the optional image pack                                          |
-| Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
-| Platform        | macOS 26, Metal 4, Swift 6.2                                                                                             |
-| M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
-| M5 measured decode | [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro |
-| Community Reports | [Here](docs/COMMUNITY_BENCHMARKS.md#community-results) |
+| Metric | Gemma 4 26B-A4B IT | LFM2.5 24B-A2B |
+| --- | --- | --- |
+| Model | 26B total, about 3.88B active per token | 24B total, A2B active |
+| Weights | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts | 4-bit resident and routed expert weights; 6-bit tied embedding and lm-head; F32 router |
+| Memory | About 2 GB with a 4K KV cache | Bounded expert streaming; no published measurement |
+| Storage | About 14.3 GB text, plus about 1.1 GB optional image pack | About 13.6 GB |
+| Hardware | Apple Silicon Mac; 8 GB validated | Apple Silicon Mac; 8 GB hosts are admitted, but no published LFM benchmark |
+| Platform | macOS 26, Metal 4, Swift 6.2 | macOS 26, Metal 4, Swift 6.2 |
+| Decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2; [31-35 tok/s](docs/BENCHMARKS.md#m5-measured-decode) on a 24 GB M5 Pro | Not yet measured |
+| Vision | Optional pack on M2 or newer | None |
 
-The measured result is a reference point, not a performance ceiling. Prompt
-length, generated length, page-cache state, and hardware all affect throughput.
-See [community benchmark results](docs/COMMUNITY_BENCHMARKS.md#community-results)
+The measured Gemma result is a reference point, not a performance ceiling.
+Prompt length, generated length, page-cache state, and hardware all affect
+throughput. See
+[community benchmark results](docs/COMMUNITY_BENCHMARKS.md#community-results)
 from other Macs, or follow the
 [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) to add your own.
+LFM2.5 has no published result yet; the community guide includes commands for
+it.
 
 ## Using TurboFieldfare
 
@@ -107,15 +157,31 @@ The Swift package exposes six products:
 Both models install as separate `.gturbo` directories and can sit side by
 side. The installed manifest's `arch.family` selects the tokenizer, runner,
 chat framing, and memory profile; a path is never guessed from its filename.
-Gemma 4 remains the default for new and existing users. The app and CLI keep
-their existing 8,192-token default for Gemma and use 8,192 for LFM; the table's
-context and slot figures are the server/descriptor defaults. See
+Gemma 4 remains the default for new and existing users. The app and CLI use
+8,192 tokens for both models; the table's context and slot figures are the
+server/descriptor defaults. See
 [LFM2.5 24B-A2B](docs/LFM2_5.md) for the architecture, tensor map, and tool
 grammar.
 
+#### LFM2.5 notes
+
+- Text-only: there is no vision pack, and `--image` with an LFM model fails
+  before a tokenizer or Metal device is loaded.
+- ChatML with a reasoning channel: generation starts in `<think>`;
+  `</think>` ends it. Reasoning is not returned or saved, and the app shows a
+  "Thinking…" indicator.
+- Defaults: 8,192-token context and 8 expert-cache slots. The checkpoint
+  supports up to 131,072 positions, but the app hides options above the model
+  ceiling.
+- Server tool calls are supported. The app and CLI do not expose a tool loop.
+- No LFM2.5 speed or memory benchmark is published in this checkout. The
+  [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) includes commands
+  for reporting one.
+
 ### Requirements
 
-- An Apple Silicon Mac; the validated target is an 8 GB M2 MacBook Air
+- An Apple Silicon Mac; Gemma 4 is validated on an 8 GB M2 MacBook Air. The
+  runtime admits LFM2.5 on 8 GB hosts, but no LFM benchmark is published here.
 - macOS 26 with Metal 4
 - Apple Command Line Tools or Xcode with Swift 6.2+ and the macOS 26 SDK or newer
 - Enough free storage for the model installation (about 14.3 GB for Gemma 4,
@@ -126,9 +192,10 @@ The package is arm64-only. Older macOS and Metal versions are not supported.
 
 ### Prompting the model
 
-The Mac app treats what you type as an instruction and handles Gemma's chat
-formatting automatically. Just describe the task and include any context the
-model needs.
+The Mac app treats what you type as an instruction and handles the selected
+model's chat formatting automatically: Gemma's chat template or LFM2.5's
+ChatML template. For LFM2.5, reasoning stays hidden. Just describe the task
+and include any context the model needs.
 
 Generation defaults to temperature `0.2`, Top-K `64`, and Top-P `0.95`. Set
 temperature to `0` for deterministic greedy output. The model can still repeat
@@ -141,11 +208,13 @@ and execute. Audio and video are not supported.
 
 ### Images
 
-Images are supported through a vision tower, which installs as a companion
-pack beside the text model. Install it once and the app, CLI, and server all
-accept images. Without it they tell you image support is unavailable, and the
-text runtime is untouched. The image tower requires an M2 or newer Apple
-Silicon Mac; text-only inference remains available on M1.
+For Gemma 4, images are supported through a vision tower, which installs as a
+companion pack beside the text model. Install it once and the app, CLI, and
+server all accept images for Gemma 4. Without it they tell you image support is
+unavailable, and the text runtime is untouched. The image tower requires an M2
+or newer Apple Silicon Mac; text-only inference remains available on M1.
+LFM2.5 has no vision tower; image requests are refused rather than answered
+without the image.
 
 [System design](docs/SYSTEM_DESIGN.md#images) covers how the tower runs and
 what it costs on an 8 GB machine.
@@ -160,8 +229,9 @@ swift build -c release
 ```
 
 Build the complete package so the app and its sibling decode service are both
-available. New installs from this checkout default to `scratch/gemma4.gturbo`;
-the app remembers a location you choose.
+available. New installs from this checkout default to a Gemma 4 path
+(`scratch/gemma4.gturbo`); the app's model picker also offers LFM2.5. The app
+remembers a location you choose.
 
 #### Build a Mac app
 
@@ -179,12 +249,15 @@ account is required.
 
 #### Install the model
 
-Choose **Download Model** to install, or **Change…** to pick a destination.
+Select **Gemma 4** or **LFM2.5 24B-A2B** on the install screen, then choose
+the matching **Download** button to install, or **Change…** to pick a
+destination. The two install side by side, and switching unloads the current
+model and keeps each model's own conversation history. LFM2.5 has no image
+pack; selecting it hides **Image Support** and applies the 8,192-token,
+8-slot defaults.
+
 To reuse a model, choose **Use Existing Model…** and select its `.gturbo`
 folder or parent folder. If several models are found, pick one.
-The install screen's model picker selects Gemma 4 or LFM2.5; the two install
-side by side, and switching unloads the current model and keeps each model's
-own conversation history. LFM2.5 has no image pack.
 Keep the optional image pack beside its text model: `gemma4.gturbo` and
 `gemma4.vision.gturbo`.
 
@@ -193,9 +266,10 @@ required byte ranges from the pinned Hugging Face revision and repacks them
 directly into the `.gturbo` layout as they arrive. This avoids a second full
 checkpoint on disk and keeps scratch memory bounded.
 
-The first installation transfers about 15 GB through bounded Hugging Face
-range requests. Network speed and Hugging Face response times vary, so it can
-take a while. The completed `.gturbo` installation occupies about 14.3 GB and
+The first installation transfers about 15 GB for Gemma 4 or about 13.6 GB for
+LFM2.5 through bounded Hugging Face range requests. Network speed and Hugging
+Face response times vary, so it can take a while. The completed `.gturbo`
+installation occupies about 14.3 GB for Gemma 4 or about 13.6 GB for LFM2.5 and
 is accepted only after its manifest and file hashes have been validated.
 Installation does not load the model into memory.
 
@@ -291,7 +365,7 @@ swift run -c release TurboFieldfareRepack \
 
 #### Install image support
 
-The companion pack installs beside the text model:
+The Gemma 4 companion pack installs beside the text model:
 
 ```bash
 swift run -c release TurboFieldfareRepack \
@@ -305,7 +379,7 @@ installed one with `--remove-vision-install`, and drop a cancelled download with
 continued with `--resume`. The Mac app installs the same pack from its
 **Image Support** section.
 
-#### Send an image
+#### Send an image with Gemma 4
 
 ```bash
 swift run -c release TurboFieldfareCLI \
@@ -320,8 +394,9 @@ and says image support is unavailable.
 
 A multi-turn conversation carries its images inside the messages file instead,
 as `image_file` parts in any user message; `--image` covers the single-turn
-case only. Either route needs at least 16 expert-cache slots, because an image
-prompt always prefills chunked.
+case only. For Gemma 4, either route needs at least 16 expert-cache slots,
+because an image prompt always prefills chunked. LFM2.5 rejects image input
+before that point.
 
 #### Instruction chat
 
@@ -367,10 +442,16 @@ swift build -c release --product TurboFieldfareServer
   --model scratch/gemma4.gturbo
 ```
 
+Pass an LFM2.5 `.gturbo` path instead to serve that model.
+
 It listens on `http://127.0.0.1:8080/v1` and supports Chat Completions,
 streaming, function tools, and single-prefix prompt reuse. The client must
 authorize and run every tool call. Keep the server on loopback; it has no
 remote authentication or TLS.
+
+The server reads the installed family. Gemma 4 defaults to a 16,384-token
+context and 16 slots; LFM2.5 defaults to 8,192 tokens and 8 slots. LFM2.5 tool
+calls use its ChatML grammar.
 
 See [Local server](docs/OPENAI_SERVER.md) for a test request, Python and
 OpenCode setup, prompt reuse, tool handling, and the supported API subset.
@@ -393,11 +474,17 @@ To contribute a comparable performance result, follow the
 
 ## How the inference engine works
 
-At each transformer layer, Metal computes attention and the router from
-resident weights. The CPU uses the router's top-8 expert IDs to plan against
-the layer's 16-slot LFU cache, then fills misses with bounded parallel `pread`
-calls into Metal-visible buffers. Metal computes the resident shared-expert
-branch while those reads run, then combines the shared and routed outputs.
+For Gemma 4, at each transformer layer, Metal computes attention and the
+router from resident weights. The CPU uses the router's top-8 expert IDs to
+plan against the layer's 16-slot LFU cache, then fills misses with bounded
+parallel `pread` calls into Metal-visible buffers. Metal computes the resident
+shared-expert branch while those reads run, then combines the shared and routed
+outputs.
+
+LFM2.5 uses top-4 routing, an 8-slot default cache, dense MLPs in its first two
+layers, and short-convolution operators in 30 of its 40 layers. The same
+bounded pread and expert-cache machinery serves both architectures; the
+installed manifest selects the runner and its kernels.
 
 Prompt prefill uses chunks of up to 128 tokens so one fetched expert can serve
 multiple rows. Generation repeats the routed layer loop one token at a time.
@@ -424,15 +511,17 @@ TurboFieldfare currently includes:
   blocks, 6-bit tied embedding/lm-head, and ChatML tool calls
 - Family dispatch from the installed manifest (`gemma4` or `lfm2_moe`) through
   the tokenizer, runner, CLI, server, app, and decode service
-- 4-bit MLX affine embedding, attention, shared-expert, and routed-expert
-  weights, with an 8-bit router
+- Gemma 4's 4-bit MLX affine embedding, attention, shared-expert, and
+  routed-expert weights, with an 8-bit router
 - Custom Metal kernels for quantized GEMV, attention, MoE, normalization,
   RoPE, sampling, and production fusions
 - SSD-backed routed-expert streaming with a bounded expert cache
 - Chunked prefill for one-shot prompts and new conversational turns, followed
   by token-by-token generation
-- FP16 KV storage with bounded circular storage for 25 sliding-window layers
-  and linear storage for 5 full-attention layers
+- Gemma 4's FP16 KV storage with bounded circular storage for 25 sliding-window
+  layers and linear storage for 5 full-attention layers
+- LFM2.5's 10 full-attention layers and 30 short-convolution layers, with FP16
+  KV and a 128-token convolution rewind span
 - Exact split-K/V decode attention with distinct normalized K and V paths
 - A Swift library, streaming installer, command-line interface, loopback
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a sibling
@@ -442,10 +531,11 @@ TurboFieldfare currently includes:
   the sliding-window layers, and routed experts are released while the tower
   runs
 
-Current scope is text input from the pinned Gemma 4 26B-A4B and LFM2.5
-24B-A2B checkpoints on Apple Silicon Macs with at least 8 GB of RAM, plus
-image input for Gemma 4 on M2 or newer Macs. LFM has no vision tower, so image
-input is refused for an LFM model. Audio and video are out of scope.
+This fork adds LFM2.5 24B-A2B to the original Gemma 4 26B-A4B work. Gemma 4
+remains the default. Current scope is text input from both pinned checkpoints
+on Apple Silicon Macs with at least 8 GB of RAM, plus image input for Gemma 4
+on M2 or newer Macs. LFM2.5 has no vision tower, so image input is refused for
+an LFM model. Audio and video are out of scope.
 
 ### Future work
 
@@ -453,6 +543,8 @@ input is refused for an LFM model. Audio and video are out of scope.
   mobile hardware.
 - Benchmark more Apple Silicon Macs, especially the base 16 GB M4 Mac mini and
   other 8 GB models.
+- Measure LFM2.5 decode speed and memory on 8 GB and larger Macs, then publish
+  the commands and results alongside the Gemma 4 numbers.
 
 ## Experiments and technical documentation
 
@@ -466,23 +558,33 @@ Useful entry points:
 
 - [Local OpenAI-compatible server](docs/OPENAI_SERVER.md)
 - [System design](docs/SYSTEM_DESIGN.md)
+- [LFM2.5 24B-A2B architecture and terms](docs/LFM2_5.md)
 - [Benchmarks](docs/BENCHMARKS.md)
 - [The experiments that shaped TurboFieldfare](docs/OPTIMIZATION_JOURNEY.md)
 - [Experiment inventory and summaries](docs/experiments/EXPERIMENT_INVENTORY.md)
 - [Implementation references](docs/IMPLEMENTATION_REFERENCES.md)
+
+## About this fork
+
+This fork is maintained by [@DehydratedFlask](https://github.com/DehydratedFlask).
+It adds LFM2.5 24B-A2B support to Andrey Mikhaylov's TurboFieldfare. The
+original project, Gemma 4 work, and design notes are at
+[drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare).
 
 ## License and model terms
 
 TurboFieldfare's source and documentation are licensed under the
 [Apache License 2.0](LICENSE).
 
-Model weights are not included. The installer downloads them separately from
-the pinned Hugging Face checkpoint, and the weights remain governed by their
-source terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the model
-and Swift package license review.
+Model weights are not included. The installer downloads Gemma 4 and LFM2.5
+from their pinned Hugging Face checkpoints, and the weights remain governed by
+their source terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
+the Gemma 4, LFM2.5, and Swift package license review.
 
 TurboFieldfare is an independent research project. It is not affiliated with,
 sponsored by, or endorsed by Google.
+
+*The afterword below is from the upstream author, Andrey Mikhaylov.*
 
 ## Afterword and the project name
 

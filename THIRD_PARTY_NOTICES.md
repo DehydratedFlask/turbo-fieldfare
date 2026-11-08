@@ -5,12 +5,13 @@ TurboFieldfare repository source is licensed under the
 and documentation. It does not relicense model weights or third-party
 packages.
 
-This file records the dependency review performed on 2026-07-15. It is an
-attribution aid, not legal advice. Anyone distributing a compiled product must
-also preserve the license and NOTICE material required by the exact dependency
-versions included in that product.
+This file records the dependency review performed on 2026-07-15 and the
+LFM2.5 model terms added on 2026-11-08. It is an attribution aid, not legal
+advice. Anyone distributing a compiled product must also preserve the license
+and NOTICE material required by the exact dependency versions included in that
+product.
 
-## Model weights
+## Gemma 4 model weights
 
 Model weights are not included in this repository. The installer downloads
 the pinned revision
@@ -23,6 +24,14 @@ Google publishes Gemma 4 under the
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of TurboFieldfare releases.
+
+## LFM2.5 model weights
+
+The fork's LFM2.5 installer downloads the pinned revision
+`667408d494bde191c2cb9dd4f4549827816b9275` of
+[`LiquidAI/LFM2.5-24B-A2B-MLX-4bit`](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit).
+Its model card declares the `lfm1.0` license. The weights are not included in
+this repository and remain governed by that license.
 
 ## Swift package graph
 
